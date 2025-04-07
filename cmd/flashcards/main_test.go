@@ -207,54 +207,207 @@ func createTestCard(c *client.StdioMCPClient, ctx context.Context, front, back s
 }
 
 func TestSubmitReview(t *testing.T) {
-	// Setup client
-	c, ctx, cancel, tempFilePath := setupMCPClient(t)
-	defer c.Close()
-	defer cancel()
-	defer os.Remove(tempFilePath)
+	t.Run("TestRatingGood", func(t *testing.T) {
+		// Setup client
+		c, ctx, cancel, tempFilePath := setupMCPClient(t)
+		defer c.Close()
+		defer cancel()
+		defer os.Remove(tempFilePath)
 
-	// Call the submit_review tool
-	submitReviewRequest := mcp.CallToolRequest{}
-	submitReviewRequest.Params.Name = "submit_review"
-	submitReviewRequest.Params.Arguments = map[string]interface{}{
-		"card_id": "card1",
-		"rating":  3.0, // 3 = Good
-		"answer":  "Paris is the capital of France",
-	}
+		// First, create a test card
+		front := "What is the capital of France?"
+		back := "Paris"
+		tags := []string{"geography", "europe", "test-review"}
+		hourOffset := -1.0 // Make it due 1 hour ago
 
-	result, err := c.CallTool(ctx, submitReviewRequest)
-	if err != nil {
-		t.Fatalf("Failed to call submit_review: %v", err)
-	}
+		// Create a card for testing
+		err := createTestCard(c, ctx, front, back, tags, hourOffset)
+		if err != nil {
+			t.Fatalf("Failed to create test card: %v", err)
+		}
 
-	// Check if we got a response
-	if len(result.Content) == 0 {
-		t.Fatalf("No content returned from submit_review")
-	}
+		// We need to get the card ID using get_due_card
+		getDueCardRequest := mcp.CallToolRequest{}
+		getDueCardRequest.Params.Name = "get_due_card"
 
-	// Extract the text content
-	textContent, ok := result.Content[0].(mcp.TextContent)
-	if !ok {
-		t.Fatalf("Expected TextContent, got %T", result.Content[0])
-	}
+		// Call get_due_card to retrieve the card we just created
+		dueResult, err := c.CallTool(ctx, getDueCardRequest)
+		if err != nil {
+			t.Fatalf("Failed to call get_due_card: %v", err)
+		}
 
-	// Parse the JSON response
-	var response ReviewResponse
-	err = json.Unmarshal([]byte(textContent.Text), &response)
-	if err != nil {
-		t.Fatalf("Failed to parse response JSON: %v", err)
-	}
+		// Extract the text content
+		dueTextContent, ok := dueResult.Content[0].(mcp.TextContent)
+		if !ok {
+			t.Fatalf("Expected TextContent, got %T", dueResult.Content[0])
+		}
 
-	// Verify the response structure
-	if !response.Success {
-		t.Error("Review submission should succeed")
-	}
-	if response.Message == "" {
-		t.Error("Response message is empty")
-	}
+		// Parse the JSON response
+		var dueResponse CardResponse
+		err = json.Unmarshal([]byte(dueTextContent.Text), &dueResponse)
+		if err != nil {
+			t.Fatalf("Failed to parse due card response JSON: %v", err)
+		}
 
-	// Print the response for debugging
-	t.Logf("Submit review response: %s", response.Message)
+		// Store the card ID for the review
+		cardID := dueResponse.Card.ID
+
+		// Verify we got the right card
+		if cardID == "" {
+			t.Fatalf("Failed to get valid card ID")
+		}
+		if dueResponse.Card.Front != front {
+			t.Fatalf("Got wrong card, expected front '%s', got '%s'", front, dueResponse.Card.Front)
+		}
+
+		// Now submit a review for this card with rating "Good" (3)
+		submitReviewRequest := mcp.CallToolRequest{}
+		submitReviewRequest.Params.Name = "submit_review"
+		submitReviewRequest.Params.Arguments = map[string]interface{}{
+			"card_id": cardID,
+			"rating":  3.0, // 3 = Good
+			"answer":  "Paris is the capital of France",
+		}
+
+		result, err := c.CallTool(ctx, submitReviewRequest)
+		if err != nil {
+			t.Fatalf("Failed to call submit_review: %v", err)
+		}
+
+		// Parse the JSON response
+		var response ReviewResponse
+		err = json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &response)
+		if err != nil {
+			t.Fatalf("Failed to parse response JSON: %v", err)
+		}
+
+		// Verify basic response structure
+		if !response.Success {
+			t.Error("Review submission should succeed")
+		}
+		if response.Card.ID != cardID {
+			t.Errorf("Card ID mismatch, expected %s, got %s", cardID, response.Card.ID)
+		}
+
+		// With rating "Good", the card should have a future due date,
+		// but might still be due if we test another card
+		t.Logf("Successfully submitted 'Good' review for card: %s", cardID)
+		t.Logf("New due date: %v", response.Card.FSRS.Due)
+		t.Logf("Card state: %d", response.Card.FSRS.State)
+	})
+
+	t.Run("TestRatingEasy", func(t *testing.T) {
+		// Setup client
+		c, ctx, cancel, tempFilePath := setupMCPClient(t)
+		defer c.Close()
+		defer cancel()
+		defer os.Remove(tempFilePath)
+
+		// First, create a test card
+		front := "What is the capital of Spain?"
+		back := "Madrid"
+		tags := []string{"geography", "europe", "test-review-easy"}
+		hourOffset := -1.0 // Make it due 1 hour ago
+
+		// Create a card for testing
+		err := createTestCard(c, ctx, front, back, tags, hourOffset)
+		if err != nil {
+			t.Fatalf("Failed to create test card: %v", err)
+		}
+
+		// First call get_due_card to retrieve the card we just created
+		getDueCardRequest := mcp.CallToolRequest{}
+		getDueCardRequest.Params.Name = "get_due_card"
+
+		// Call get_due_card to retrieve the card
+		dueResult, err := c.CallTool(ctx, getDueCardRequest)
+		if err != nil {
+			t.Fatalf("Failed to call get_due_card: %v", err)
+		}
+
+		// Extract the card details
+		var dueResponse CardResponse
+		err = json.Unmarshal([]byte(dueResult.Content[0].(mcp.TextContent).Text), &dueResponse)
+		if err != nil {
+			t.Fatalf("Failed to parse due card response JSON: %v", err)
+		}
+
+		// Verify we got the right card
+		cardID := dueResponse.Card.ID
+		if cardID == "" {
+			t.Fatalf("Failed to get valid card ID")
+		}
+		if dueResponse.Card.Front != front {
+			t.Fatalf("Got wrong card, expected front '%s', got '%s'", front, dueResponse.Card.Front)
+		}
+
+		// Now submit an "Easy" rating (4) for this card
+		submitReviewRequest := mcp.CallToolRequest{}
+		submitReviewRequest.Params.Name = "submit_review"
+		submitReviewRequest.Params.Arguments = map[string]interface{}{
+			"card_id": cardID,
+			"rating":  4.0, // 4 = Easy
+			"answer":  "Madrid is the capital of Spain",
+		}
+
+		result, err := c.CallTool(ctx, submitReviewRequest)
+		if err != nil {
+			t.Fatalf("Failed to call submit_review: %v", err)
+		}
+
+		// Parse the JSON response
+		var response ReviewResponse
+		err = json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &response)
+		if err != nil {
+			t.Fatalf("Failed to parse response JSON: %v", err)
+		}
+
+		// Verify the card state was updated and is no longer New
+		if response.Card.FSRS.State <= 0 {
+			t.Errorf("Card state should be updated after review, got %d", response.Card.FSRS.State)
+		}
+
+		// Verify the card due date was updated (should be far in the future for Easy rating)
+		if !response.Card.FSRS.Due.After(time.Now().Add(12 * time.Hour)) {
+			t.Error("Card due date should be well in the future after Easy rating")
+		}
+
+		t.Logf("Successfully submitted 'Easy' review for card: %s", cardID)
+		t.Logf("New due date: %v", response.Card.FSRS.Due)
+		t.Logf("Card state: %d", response.Card.FSRS.State)
+
+		// Now try to get a due card again - we should get a different card or an error
+		// since the card we just reviewed with "Easy" should not be due
+		dueResult2, err := c.CallTool(ctx, getDueCardRequest)
+		if err != nil {
+			t.Fatalf("Failed to call get_due_card after review: %v", err)
+		}
+
+		// Check if we got an error (no cards due) or a different card
+		textContent, ok := dueResult2.Content[0].(mcp.TextContent)
+		if !ok {
+			t.Fatalf("Expected TextContent, got %T", dueResult2.Content[0])
+		}
+
+		// If the response contains error about no due cards, that's expected
+		if strings.Contains(textContent.Text, "No cards due") {
+			t.Logf("No more cards due after rating as Easy - this is expected")
+		} else {
+			// Otherwise, we should have gotten a different card
+			var dueResponse2 CardResponse
+			err = json.Unmarshal([]byte(textContent.Text), &dueResponse2)
+			if err != nil {
+				t.Fatalf("Failed to parse second get_due_card response: %v", err)
+			}
+
+			// Make sure we got a different card
+			if dueResponse2.Card.ID == cardID {
+				t.Errorf("Card rated as Easy should not appear in get_due_card immediately afterward")
+			} else {
+				t.Logf("Got a different card: %s", dueResponse2.Card.Front)
+			}
+		}
+	})
 }
 
 func TestCreateCard(t *testing.T) {

@@ -47,6 +47,7 @@ type CardResponse struct {
 type ReviewResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+	Card    Card   `json:"card,omitempty"`
 }
 
 // CreateCardResponse represents the response structure for create_card
@@ -128,14 +129,27 @@ func handleSubmitReview(ctx context.Context, request mcp.CallToolRequest) (*mcp.
 	// Extract optional parameter
 	answer, _ := request.Params.Arguments["answer"].(string)
 
-	// Create a hardcoded response
+	// Get the service from context
+	s, ok := ctx.Value("service").(*FlashcardService)
+	if !ok || s == nil {
+		return mcp.NewToolResultText("Error: Service not available"), nil
+	}
+
+	// Convert rating to fsrs.Rating
+	fsrsRating := gofsrs.Rating(rating)
+
+	// Call service method to submit review
+	updatedCard, err := s.SubmitReview(cardID, fsrsRating, answer)
+	if err != nil {
+		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Error submitting review: %v"}`, err)), nil
+	}
+
+	// Create response
 	response := ReviewResponse{
 		Success: true,
 		Message: "Review submitted successfully for card " + cardID,
+		Card:    updatedCard,
 	}
-
-	// Include used parameters in log for debugging
-	log.Printf("Submitted review for card %s with rating %d and answer '%s'", cardID, rating, answer)
 
 	jsonBytes, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
@@ -260,6 +274,53 @@ func (s *FlashcardService) calculateStats(cards []storage.Card) CardStats {
 		ReviewsToday:  len(reviews),
 		RetentionRate: retentionRate,
 	}
+}
+
+// SubmitReview processes a review for a card and updates its state using the FSRS algorithm
+func (s *FlashcardService) SubmitReview(cardID string, rating gofsrs.Rating, answer string) (Card, error) {
+	// Get the card from storage
+	storageCard, err := s.Storage.GetCard(cardID)
+	if err != nil {
+		return Card{}, fmt.Errorf("error getting card: %w", err)
+	}
+
+	// Convert storage.Card to our Card type
+	card := Card{
+		ID:        storageCard.ID,
+		Front:     storageCard.Front,
+		Back:      storageCard.Back,
+		CreatedAt: storageCard.CreatedAt,
+		Tags:      storageCard.Tags,
+		FSRS:      storageCard.FSRS,
+	}
+
+	now := time.Now()
+
+	// Use FSRS manager to schedule the review using the go-fsrs library
+	updatedState, newDueDate := s.FSRSManager.ScheduleReview(card.FSRS.State, rating, now)
+
+	// Update the card with new state information
+	card.FSRS.State = updatedState
+	card.FSRS.Due = newDueDate
+
+	// Save the updated card state back to storage
+	storageCard.FSRS = card.FSRS
+	if err := s.Storage.UpdateCard(storageCard); err != nil {
+		return Card{}, fmt.Errorf("error updating card: %w", err)
+	}
+
+	// Add review to storage
+	_, err = s.Storage.AddReview(cardID, rating, answer)
+	if err != nil {
+		return Card{}, fmt.Errorf("error adding review: %w", err)
+	}
+
+	// Persist changes to disk
+	if err := s.Storage.Save(); err != nil {
+		return Card{}, fmt.Errorf("error saving storage: %w", err)
+	}
+
+	return card, nil
 }
 
 // handleCreateCard handles the create_card tool request
