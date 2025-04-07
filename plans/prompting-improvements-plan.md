@@ -113,11 +113,16 @@ Repeat this process for all five existing tools.
 - **Optional**: Consider adding a simple test case in `main_test.go` that retrieves the server's capabilities or tool definitions (if the MCP client library supports this) and asserts that the description strings match the expected enhanced text. This provides some automated verification that the text is being applied.
 
 ### Success Criteria
-- [ ] `serverInfo` constant is defined correctly in `cmd/flashcards/main.go`.
-- [ ] `server.NewMCPServer` call includes `server.WithServerInfo()`.
-- [ ] Descriptions for `get_due_card`, `submit_review`, `create_card`, `update_card`, `list_cards` are updated with the enhanced text from the design document.
-- [ ] Existing integration tests in `main_test.go` still pass (ensuring no functional regressions).
-- [ ] Manual verification confirms the new text is present in server info and tool descriptions.
+- [x] `serverInfo` constant is defined correctly in `cmd/flashcards/main.go`.
+- [x] `server.NewMCPServer` call includes `server.WithServerInfo()` (implemented as `WithInstructions()`).
+- [x] Descriptions for `get_due_card`, `submit_review`, `create_card`, `update_card`, `list_cards` are updated with the enhanced text from the design document.
+- [x] Existing integration tests in `main_test.go` still pass (ensuring no functional regressions).
+- [x] Manual verification confirms the new text is present in server info and tool descriptions.
+
+#### Implementation Notes
+- Added a new test file `server_info_test.go` that verifies the server info and tool descriptions are correctly provided to MCP clients
+- Discovered that the server info and enhanced tool descriptions were already implemented in the codebase
+- Verified all tests (including the new test) pass successfully
 
 ## Task 2: Add `help_analyze_learning` Tool
 
