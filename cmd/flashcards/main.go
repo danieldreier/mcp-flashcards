@@ -69,8 +69,8 @@ type DeleteCardResponse struct {
 
 // ListCardsResponse represents the response structure for list_cards
 type ListCardsResponse struct {
-	Cards []storage.Card `json:"cards"`
-	Stats CardStats      `json:"stats,omitempty"`
+	Cards []Card    `json:"cards"`
+	Stats CardStats `json:"stats,omitempty"`
 }
 
 // handleGetDueCard handles the get_due_card tool request
@@ -163,6 +163,124 @@ func handleSubmitReview(ctx context.Context, request mcp.CallToolRequest) (*mcp.
 type FlashcardService struct {
 	Storage     storage.Storage
 	FSRSManager fsrs.FSRSManager
+}
+
+// UpdateCard updates an existing flashcard
+// Only updates content fields, preserves FSRS algorithm data
+func (s *FlashcardService) UpdateCard(cardID string, front, back string, tags []string) (Card, error) {
+	// Get the card from storage
+	storageCard, err := s.Storage.GetCard(cardID)
+	if err != nil {
+		return Card{}, fmt.Errorf("error getting card: %w", err)
+	}
+
+	// Update card fields (only update non-empty fields)
+	if front != "" {
+		storageCard.Front = front
+	}
+	if back != "" {
+		storageCard.Back = back
+	}
+	if len(tags) > 0 {
+		storageCard.Tags = tags
+	}
+
+	// Save the updated card back to storage
+	if err := s.Storage.UpdateCard(storageCard); err != nil {
+		return Card{}, fmt.Errorf("error updating card: %w", err)
+	}
+
+	// Persist changes to disk
+	if err := s.Storage.Save(); err != nil {
+		return Card{}, fmt.Errorf("error saving storage: %w", err)
+	}
+
+	// Convert storage.Card to our Card type
+	card := Card{
+		ID:        storageCard.ID,
+		Front:     storageCard.Front,
+		Back:      storageCard.Back,
+		CreatedAt: storageCard.CreatedAt,
+		Tags:      storageCard.Tags,
+		FSRS:      storageCard.FSRS,
+	}
+
+	return card, nil
+}
+
+// DeleteCard deletes a flashcard
+func (s *FlashcardService) DeleteCard(cardID string) error {
+	// Delete the card from storage
+	if err := s.Storage.DeleteCard(cardID); err != nil {
+		return fmt.Errorf("error deleting card: %w", err)
+	}
+
+	// Persist changes to disk
+	if err := s.Storage.Save(); err != nil {
+		return fmt.Errorf("error saving storage: %w", err)
+	}
+
+	return nil
+}
+
+// ListCards lists all flashcards, optionally filtered by tags
+func (s *FlashcardService) ListCards(filterTags []string, includeStats bool) ([]Card, CardStats, error) {
+	// Get all cards from storage
+	// If no filter tags, get all cards
+	storageCards, err := s.Storage.ListCards(nil)
+	if err != nil {
+		return nil, CardStats{}, fmt.Errorf("error listing cards: %w", err)
+	}
+
+	// If filter tags provided, filter the cards to only include those with ALL specified tags
+	filteredCards := storageCards
+	if len(filterTags) > 0 {
+		filteredCards = []storage.Card{}
+		for _, card := range storageCards {
+			// Check if card has all the required tags
+			hasAllTags := true
+			for _, requiredTag := range filterTags {
+				tagFound := false
+				for _, cardTag := range card.Tags {
+					if cardTag == requiredTag {
+						tagFound = true
+						break
+					}
+				}
+				if !tagFound {
+					hasAllTags = false
+					break
+				}
+			}
+
+			// Only include cards that have all the required tags
+			if hasAllTags {
+				filteredCards = append(filteredCards, card)
+			}
+		}
+	}
+
+	// Convert filtered storage.Card array to our Card type array
+	cards := make([]Card, 0, len(filteredCards))
+	for _, storageCard := range filteredCards {
+		card := Card{
+			ID:        storageCard.ID,
+			Front:     storageCard.Front,
+			Back:      storageCard.Back,
+			CreatedAt: storageCard.CreatedAt,
+			Tags:      storageCard.Tags,
+			FSRS:      storageCard.FSRS,
+		}
+		cards = append(cards, card)
+	}
+
+	// Calculate stats if requested
+	var stats CardStats
+	if includeStats {
+		stats = s.calculateStats(storageCards) // Use all cards for stats calculation
+	}
+
+	return cards, stats, nil
 }
 
 // NewFlashcardService creates a new FlashcardService
@@ -409,13 +527,23 @@ func handleUpdateCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 		}
 	}
 
-	// Log what would be updated
-	log.Printf("Updating card %s - Front: '%s', Back: '%s', Tags: %v", cardID, front, back, tags)
+	// Get the service from context
+	s, ok := ctx.Value("service").(*FlashcardService)
+	if !ok || s == nil {
+		return mcp.NewToolResultText("Error: Service not available"), nil
+	}
 
-	// Create a hardcoded response
+	// Update the card using the service
+	updatedCard, err := s.UpdateCard(cardID, front, back, tags)
+	if err != nil {
+		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Error updating card: %v"}`, err)), nil
+	}
+
+	// Create response
 	response := UpdateCardResponse{
 		Success: true,
-		Message: "Card " + cardID + " updated successfully",
+		Message: fmt.Sprintf("Card %s updated successfully - Front: %s, Back: %s",
+			cardID, updatedCard.Front, updatedCard.Back),
 	}
 
 	jsonBytes, err := json.MarshalIndent(response, "", "  ")
@@ -434,13 +562,28 @@ func handleDeleteCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 		return mcp.NewToolResultText("Missing required parameter: card_id"), nil
 	}
 
-	// Log what would be deleted
-	log.Printf("Deleting card %s", cardID)
+	// Get the service from context
+	s, ok := ctx.Value("service").(*FlashcardService)
+	if !ok || s == nil {
+		return mcp.NewToolResultText("Error: Service not available"), nil
+	}
 
-	// Create a hardcoded response
+	// First check if the card exists
+	_, err := s.Storage.GetCard(cardID)
+	if err != nil {
+		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Card not found: %v"}`, err)), nil
+	}
+
+	// Delete the card using the service
+	err = s.DeleteCard(cardID)
+	if err != nil {
+		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Error deleting card: %v"}`, err)), nil
+	}
+
+	// Create response
 	response := DeleteCardResponse{
 		Success: true,
-		Message: "Card " + cardID + " deleted successfully",
+		Message: fmt.Sprintf("Card %s was successfully deleted", cardID),
 	}
 
 	jsonBytes, err := json.MarshalIndent(response, "", "  ")
@@ -463,88 +606,37 @@ func handleListCards(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 		}
 	}
 
-	includeStats, _ := request.Params.Arguments["include_stats"].(bool)
-
-	// Create some hardcoded cards
-	card1 := Card{
-		ID:        "card1",
-		Front:     "What is the capital of France?",
-		Back:      "Paris",
-		CreatedAt: time.Now().Add(-24 * time.Hour),
-		Tags:      []string{"geography", "europe"},
-		FSRS:      gofsrs.NewCard(),
+	includeStats := false
+	if includeStatsVal, ok := request.Params.Arguments["include_stats"].(bool); ok {
+		includeStats = includeStatsVal
 	}
 
-	card2 := Card{
-		ID:        "card2",
-		Front:     "What is the capital of Japan?",
-		Back:      "Tokyo",
-		CreatedAt: time.Now().Add(-48 * time.Hour),
-		Tags:      []string{"geography", "asia"},
-		FSRS:      gofsrs.NewCard(),
+	// Get the service from context
+	s, ok := ctx.Value("service").(*FlashcardService)
+	if !ok || s == nil {
+		return mcp.NewToolResultText("Error: Service not available"), nil
 	}
 
-	card3 := Card{
-		ID:        "card3",
-		Front:     "What is the capital of Brazil?",
-		Back:      "Brasília",
-		CreatedAt: time.Now().Add(-72 * time.Hour),
-		Tags:      []string{"geography", "south-america"},
-		FSRS:      gofsrs.NewCard(),
+	// Get cards from service
+	cards, stats, err := s.ListCards(filterTags, includeStats)
+	if err != nil {
+		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Error listing cards: %v"}`, err)), nil
 	}
 
-	// Create a list of cards (for now, hardcoded)
-	allCards := []Card{card1, card2, card3}
-
-	// Filter cards by tags if provided
-	filteredCards := allCards
-	if len(filterTags) > 0 {
-		filteredCards = []Card{}
-		for _, card := range allCards {
-			// Check if the card has at least one of the filter tags
-			hasTag := false
-			for _, cardTag := range card.Tags {
-				for _, filterTag := range filterTags {
-					if cardTag == filterTag {
-						hasTag = true
-						break
-					}
-				}
-				if hasTag {
-					break
-				}
-			}
-			if hasTag {
-				filteredCards = append(filteredCards, card)
-			}
-		}
+	// Prepare the cards for the response
+	var responseCards []Card
+	for _, card := range cards {
+		responseCards = append(responseCards, card)
 	}
 
-	// Create response - converting Card to storage.Card
-	var filteredStorageCards []storage.Card
-	for _, card := range filteredCards {
-		filteredStorageCards = append(filteredStorageCards, storage.Card{
-			ID:        card.ID,
-			Front:     card.Front,
-			Back:      card.Back,
-			CreatedAt: card.CreatedAt,
-			Tags:      card.Tags,
-			FSRS:      card.FSRS,
-		})
-	}
-
+	// Create response
 	response := ListCardsResponse{
-		Cards: filteredStorageCards,
+		Cards: responseCards,
 	}
 
 	// Include stats if requested
 	if includeStats {
-		response.Stats = CardStats{
-			TotalCards:    len(allCards),
-			DueCards:      2,
-			ReviewsToday:  5,
-			RetentionRate: 0.85,
-		}
+		response.Stats = stats
 	}
 
 	jsonBytes, err := json.MarshalIndent(response, "", "  ")

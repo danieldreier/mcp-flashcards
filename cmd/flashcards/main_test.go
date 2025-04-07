@@ -499,14 +499,51 @@ func TestUpdateCard(t *testing.T) {
 	defer cancel()
 	defer os.Remove(tempFilePath)
 
+	// First create a card to update
+	front := "What is the capital of France?"
+	back := "Paris"
+	tags := []string{"geography", "europe"}
+
+	err := createTestCard(c, ctx, front, back, tags, 0)
+	if err != nil {
+		t.Fatalf("Failed to create test card: %v", err)
+	}
+
+	// Get the card ID using list_cards
+	listCardsRequest := mcp.CallToolRequest{}
+	listCardsRequest.Params.Name = "list_cards"
+
+	listResult, err := c.CallTool(ctx, listCardsRequest)
+	if err != nil {
+		t.Fatalf("Failed to call list_cards: %v", err)
+	}
+
+	// Parse the list cards response to get the card ID
+	var listResponse ListCardsResponse
+	err = json.Unmarshal([]byte(listResult.Content[0].(mcp.TextContent).Text), &listResponse)
+	if err != nil {
+		t.Fatalf("Failed to parse list response: %v", err)
+	}
+
+	if len(listResponse.Cards) == 0 {
+		t.Fatalf("No cards found in storage")
+	}
+
+	cardID := listResponse.Cards[0].ID
+
+	// Define updated values
+	updatedFront := "What is the capital of France? (Updated)"
+	updatedBack := "Paris - City of Light"
+	updatedTags := []interface{}{"geography", "europe", "travel"}
+
 	// Call the update_card tool
 	updateCardRequest := mcp.CallToolRequest{}
 	updateCardRequest.Params.Name = "update_card"
 	updateCardRequest.Params.Arguments = map[string]interface{}{
-		"card_id": "card1",
-		"front":   "What is the capital of France? (Updated)",
-		"back":    "Paris - City of Light",
-		"tags":    []interface{}{"geography", "europe", "travel"},
+		"card_id": cardID,
+		"front":   updatedFront,
+		"back":    updatedBack,
+		"tags":    updatedTags,
 	}
 
 	result, err := c.CallTool(ctx, updateCardRequest)
@@ -542,6 +579,65 @@ func TestUpdateCard(t *testing.T) {
 
 	// Print the response for debugging
 	t.Logf("Update card response: %s", response.Message)
+
+	// Verify the update was persisted by retrieving the card again
+	listCardsRequest = mcp.CallToolRequest{}
+	listCardsRequest.Params.Name = "list_cards"
+
+	listResult, err = c.CallTool(ctx, listCardsRequest)
+	if err != nil {
+		t.Fatalf("Failed to call list_cards after update: %v", err)
+	}
+
+	// Parse the updated list
+	var updatedListResponse ListCardsResponse
+	err = json.Unmarshal([]byte(listResult.Content[0].(mcp.TextContent).Text), &updatedListResponse)
+	if err != nil {
+		t.Fatalf("Failed to parse updated list response: %v", err)
+	}
+
+	// Find our updated card
+	var updatedCard Card
+	cardFound := false
+	for _, card := range updatedListResponse.Cards {
+		if card.ID == cardID {
+			updatedCard = card
+			cardFound = true
+			break
+		}
+	}
+
+	if !cardFound {
+		t.Fatalf("Updated card with ID %s not found in list response", cardID)
+	}
+
+	// Verify the card was updated with the new values
+	if updatedCard.Front != updatedFront {
+		t.Errorf("Card front not updated. Expected: %s, Got: %s", updatedFront, updatedCard.Front)
+	}
+	if updatedCard.Back != updatedBack {
+		t.Errorf("Card back not updated. Expected: %s, Got: %s", updatedBack, updatedCard.Back)
+	}
+
+	// Verify tags were updated
+	if len(updatedCard.Tags) != 3 {
+		t.Errorf("Expected 3 tags after update, got: %d", len(updatedCard.Tags))
+	}
+
+	// Check for travel tag which was newly added
+	travelTagFound := false
+	for _, tag := range updatedCard.Tags {
+		if tag == "travel" {
+			travelTagFound = true
+			break
+		}
+	}
+	if !travelTagFound {
+		t.Errorf("New 'travel' tag not found in updated card tags: %v", updatedCard.Tags)
+	}
+
+	t.Logf("Verified card was persisted with updated values - Front: %s, Back: %s, Tags: %v",
+		updatedCard.Front, updatedCard.Back, updatedCard.Tags)
 }
 
 func TestDeleteCard(t *testing.T) {
@@ -551,11 +647,68 @@ func TestDeleteCard(t *testing.T) {
 	defer cancel()
 	defer os.Remove(tempFilePath)
 
+	// First create a card to delete
+	front := "Card to be deleted"
+	back := "This card will be deleted in the test"
+	tags := []string{"test", "delete"}
+
+	err := createTestCard(c, ctx, front, back, tags, 0)
+	if err != nil {
+		t.Fatalf("Failed to create test card: %v", err)
+	}
+
+	// Create a second card that won't be deleted, to verify targeted deletion
+	err = createTestCard(c, ctx, "Card that should remain", "This card should not be deleted", []string{"test", "remain"}, 0)
+	if err != nil {
+		t.Fatalf("Failed to create second test card: %v", err)
+	}
+
+	// Get all cards and count them
+	listCardsRequest := mcp.CallToolRequest{}
+	listCardsRequest.Params.Name = "list_cards"
+
+	listResult, err := c.CallTool(ctx, listCardsRequest)
+	if err != nil {
+		t.Fatalf("Failed to call list_cards: %v", err)
+	}
+
+	// Parse the list cards response
+	var listResponse ListCardsResponse
+	err = json.Unmarshal([]byte(listResult.Content[0].(mcp.TextContent).Text), &listResponse)
+	if err != nil {
+		t.Fatalf("Failed to parse list response: %v", err)
+	}
+
+	initialCardCount := len(listResponse.Cards)
+	if initialCardCount < 2 {
+		t.Fatalf("Expected at least 2 cards before deletion, got %d", initialCardCount)
+	}
+
+	// Find the card to delete (the one with "delete" tag)
+	var cardToDeleteID string
+	for _, card := range listResponse.Cards {
+		for _, tag := range card.Tags {
+			if tag == "delete" {
+				cardToDeleteID = card.ID
+				break
+			}
+		}
+		if cardToDeleteID != "" {
+			break
+		}
+	}
+
+	if cardToDeleteID == "" {
+		t.Fatalf("Could not find card with 'delete' tag")
+	}
+
+	t.Logf("Initial card count: %d, will delete card ID: %s", initialCardCount, cardToDeleteID)
+
 	// Call the delete_card tool
 	deleteCardRequest := mcp.CallToolRequest{}
 	deleteCardRequest.Params.Name = "delete_card"
 	deleteCardRequest.Params.Arguments = map[string]interface{}{
-		"card_id": "card1",
+		"card_id": cardToDeleteID,
 	}
 
 	result, err := c.CallTool(ctx, deleteCardRequest)
@@ -591,6 +744,47 @@ func TestDeleteCard(t *testing.T) {
 
 	// Print the response for debugging
 	t.Logf("Delete card response: %s", response.Message)
+
+	// Verify the card was actually deleted by listing cards again
+	listResult, err = c.CallTool(ctx, listCardsRequest)
+	if err != nil {
+		t.Fatalf("Failed to call list_cards after deletion: %v", err)
+	}
+
+	// Parse the updated list
+	var afterDeleteListResponse ListCardsResponse
+	err = json.Unmarshal([]byte(listResult.Content[0].(mcp.TextContent).Text), &afterDeleteListResponse)
+	if err != nil {
+		t.Fatalf("Failed to parse list response after deletion: %v", err)
+	}
+
+	// Verify card count decreased by exactly 1
+	finalCardCount := len(afterDeleteListResponse.Cards)
+	if finalCardCount != initialCardCount-1 {
+		t.Errorf("Expected %d cards after deletion, got %d", initialCardCount-1, finalCardCount)
+	}
+
+	// Verify the specific card is no longer in the list
+	for _, card := range afterDeleteListResponse.Cards {
+		if card.ID == cardToDeleteID {
+			t.Errorf("Card with ID %s was found after deletion", cardToDeleteID)
+		}
+	}
+
+	// Try to delete the same card again - should fail
+	result, err = c.CallTool(ctx, deleteCardRequest)
+	if err != nil {
+		t.Fatalf("Failed to call delete_card second time: %v", err)
+	}
+
+	// The error should be in the response text
+	secondDeleteText := result.Content[0].(mcp.TextContent).Text
+	if !strings.Contains(secondDeleteText, "Card not found") &&
+		!strings.Contains(secondDeleteText, "error") {
+		t.Errorf("Expected error when deleting non-existent card, but got: %s", secondDeleteText)
+	}
+
+	t.Logf("Verified card was correctly deleted and cannot be deleted again")
 }
 
 func TestListCards(t *testing.T) {
@@ -599,6 +793,36 @@ func TestListCards(t *testing.T) {
 	defer c.Close()
 	defer cancel()
 	defer os.Remove(tempFilePath)
+
+	// First, clear any existing cards by creating a fresh test
+
+	// Create some test cards with specific content for verification
+	err := createTestCard(c, ctx, "Europe Card 1", "Paris", []string{"geography", "europe", "capital"}, 0)
+	if err != nil {
+		t.Fatalf("Failed to create test card 1: %v", err)
+	}
+
+	err = createTestCard(c, ctx, "Asia Card", "Tokyo", []string{"geography", "asia", "capital"}, 0)
+	if err != nil {
+		t.Fatalf("Failed to create test card 2: %v", err)
+	}
+
+	err = createTestCard(c, ctx, "Europe Card 2", "Berlin", []string{"geography", "europe", "capital"}, 0)
+	if err != nil {
+		t.Fatalf("Failed to create test card 3: %v", err)
+	}
+
+	// Create a card with different tags for more complex filtering tests
+	err = createTestCard(c, ctx, "History Card", "World War II", []string{"history", "europe"}, 0)
+	if err != nil {
+		t.Fatalf("Failed to create test card 4: %v", err)
+	}
+
+	// Create a card that's due in the future to test stats calculation
+	err = createTestCard(c, ctx, "Future Card", "This card is due in the future", []string{"test", "future"}, 24) // due in 24 hours
+	if err != nil {
+		t.Fatalf("Failed to create future test card: %v", err)
+	}
 
 	// Test 1: List all cards without filtering
 	t.Run("ListAllCards", func(t *testing.T) {
@@ -631,14 +855,39 @@ func TestListCards(t *testing.T) {
 			t.Fatalf("Failed to parse response JSON: %v", err)
 		}
 
-		// Verify the response structure
-		if len(response.Cards) == 0 {
-			t.Error("Expected at least one card")
+		// Verify we got all 5 cards
+		if len(response.Cards) != 5 {
+			t.Errorf("Expected exactly 5 cards, got %d", len(response.Cards))
 		}
 
-		// Check that stats were included
-		if response.Stats.TotalCards <= 0 {
-			t.Error("Total cards should be > 0")
+		// Check that stats were included and match expected values
+		if response.Stats.TotalCards != 5 {
+			t.Errorf("Total cards should be 5, got %d", response.Stats.TotalCards)
+		}
+
+		// 4 cards should be due now, 1 in the future
+		if response.Stats.DueCards != 4 {
+			t.Errorf("Expected 4 due cards, got %d", response.Stats.DueCards)
+		}
+
+		// Verify we got all the expected cards by checking titles
+		cardTitles := make(map[string]bool)
+		for _, card := range response.Cards {
+			cardTitles[card.Front] = true
+		}
+
+		expectedTitles := []string{
+			"Europe Card 1",
+			"Asia Card",
+			"Europe Card 2",
+			"History Card",
+			"Future Card",
+		}
+
+		for _, title := range expectedTitles {
+			if !cardTitles[title] {
+				t.Errorf("Expected card with title '%s' not found", title)
+			}
 		}
 
 		// Print the response for debugging
@@ -646,8 +895,8 @@ func TestListCards(t *testing.T) {
 		t.Logf("Stats: %d total cards, %d due cards", response.Stats.TotalCards, response.Stats.DueCards)
 	})
 
-	// Test 2: List cards with tag filtering
-	t.Run("ListFilteredCards", func(t *testing.T) {
+	// Test 2: List cards with single tag filtering
+	t.Run("ListFilteredByEuropeTag", func(t *testing.T) {
 		listCardsRequest := mcp.CallToolRequest{}
 		listCardsRequest.Params.Name = "list_cards"
 		listCardsRequest.Params.Arguments = map[string]interface{}{
@@ -656,30 +905,19 @@ func TestListCards(t *testing.T) {
 
 		result, err := c.CallTool(ctx, listCardsRequest)
 		if err != nil {
-			t.Fatalf("Failed to call list_cards with filter: %v", err)
-		}
-
-		// Check if we got a response
-		if len(result.Content) == 0 {
-			t.Fatalf("No content returned from list_cards with filter")
-		}
-
-		// Extract the text content
-		textContent, ok := result.Content[0].(mcp.TextContent)
-		if !ok {
-			t.Fatalf("Expected TextContent, got %T", result.Content[0])
+			t.Fatalf("Failed to call list_cards with europe filter: %v", err)
 		}
 
 		// Parse the JSON response
 		var response ListCardsResponse
-		err = json.Unmarshal([]byte(textContent.Text), &response)
+		err = json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &response)
 		if err != nil {
-			t.Fatalf("Failed to parse response JSON: %v", err)
+			t.Fatalf("Failed to parse europe filter response: %v", err)
 		}
 
-		// Verify the filtered response
-		if len(response.Cards) == 0 {
-			t.Error("Expected at least one card with 'europe' tag")
+		// Should be 3 cards with europe tag
+		if len(response.Cards) != 3 {
+			t.Errorf("Expected 3 cards with 'europe' tag, got %d", len(response.Cards))
 		}
 
 		// Verify all cards have the requested tag
@@ -696,7 +934,110 @@ func TestListCards(t *testing.T) {
 			}
 		}
 
-		// Print the response for debugging
 		t.Logf("Listed %d cards with 'europe' tag", len(response.Cards))
+	})
+
+	// Test 3: List cards with multiple tag filtering
+	t.Run("ListFilteredByMultipleTags", func(t *testing.T) {
+		listCardsRequest := mcp.CallToolRequest{}
+		listCardsRequest.Params.Name = "list_cards"
+		listCardsRequest.Params.Arguments = map[string]interface{}{
+			"tags": []interface{}{"europe", "capital"},
+		}
+
+		result, err := c.CallTool(ctx, listCardsRequest)
+		if err != nil {
+			t.Fatalf("Failed to call list_cards with multiple tag filter: %v", err)
+		}
+
+		// Parse the JSON response
+		var response ListCardsResponse
+		err = json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &response)
+		if err != nil {
+			t.Fatalf("Failed to parse multiple tag filter response: %v", err)
+		}
+
+		// Should be 2 cards with both europe and capital tags
+		if len(response.Cards) != 2 {
+			t.Errorf("Expected 2 cards with both 'europe' and 'capital' tags, got %d", len(response.Cards))
+		}
+
+		// Verify all returned cards have both required tags
+		for _, card := range response.Cards {
+			hasEurope := false
+			hasCapital := false
+
+			for _, tag := range card.Tags {
+				if tag == "europe" {
+					hasEurope = true
+				}
+				if tag == "capital" {
+					hasCapital = true
+				}
+			}
+
+			if !hasEurope || !hasCapital {
+				t.Errorf("Card %s is missing one of the required tags", card.ID)
+			}
+		}
+
+		t.Logf("Listed %d cards with both 'europe' and 'capital' tags", len(response.Cards))
+	})
+
+	// Test 4: List cards with no stats
+	t.Run("ListCardsWithoutStats", func(t *testing.T) {
+		listCardsRequest := mcp.CallToolRequest{}
+		listCardsRequest.Params.Name = "list_cards"
+		listCardsRequest.Params.Arguments = map[string]interface{}{
+			"include_stats": false,
+		}
+
+		result, err := c.CallTool(ctx, listCardsRequest)
+		if err != nil {
+			t.Fatalf("Failed to call list_cards without stats: %v", err)
+		}
+
+		// Parse the JSON response
+		var response ListCardsResponse
+		err = json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &response)
+		if err != nil {
+			t.Fatalf("Failed to parse no-stats response: %v", err)
+		}
+
+		// Verify stats are zero values when not requested
+		if response.Stats.TotalCards != 0 || response.Stats.DueCards != 0 {
+			t.Errorf("Stats should be zero when include_stats is false, got total=%d, due=%d",
+				response.Stats.TotalCards, response.Stats.DueCards)
+		}
+
+		t.Logf("Correctly handled list request without stats")
+	})
+
+	// Test 5: List cards with non-existent tag
+	t.Run("ListCardsWithNonExistentTag", func(t *testing.T) {
+		listCardsRequest := mcp.CallToolRequest{}
+		listCardsRequest.Params.Name = "list_cards"
+		listCardsRequest.Params.Arguments = map[string]interface{}{
+			"tags": []interface{}{"nonexistenttag"},
+		}
+
+		result, err := c.CallTool(ctx, listCardsRequest)
+		if err != nil {
+			t.Fatalf("Failed to call list_cards with non-existent tag: %v", err)
+		}
+
+		// Parse the JSON response
+		var response ListCardsResponse
+		err = json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &response)
+		if err != nil {
+			t.Fatalf("Failed to parse non-existent tag response: %v", err)
+		}
+
+		// Should return 0 cards
+		if len(response.Cards) != 0 {
+			t.Errorf("Expected 0 cards with non-existent tag, got %d", len(response.Cards))
+		}
+
+		t.Logf("Correctly returned empty list for non-existent tag")
 	})
 }

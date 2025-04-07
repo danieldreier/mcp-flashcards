@@ -1072,17 +1072,36 @@ For each tool, create tests that:
 - Test edge cases and error handling
 
 ### Success Criteria
-- [ ] All tools are fully implemented and connected to the storage system
-- [ ] Each tool correctly handles its operation
-- [ ] Tests verify the correct behavior for each tool
-- [ ] The code follows the MCP pattern from the calculator example
+- [x] All tools are fully implemented and connected to the storage system
+  - Implemented update_card, delete_card, and list_cards tools with full storage integration
+  - Each tool properly validates input parameters and handles errors appropriately
+- [x] Each tool correctly handles its operation
+  - update_card preserves FSRS algorithm data while updating content fields
+  - delete_card properly removes cards from storage and handles non-existent cards
+  - list_cards supports both single and multiple tag filtering with proper AND logic
+- [x] Tests verify the correct behavior for each tool
+  - Added comprehensive tests for all tools with proper validation of behavior
+  - Included tests for edge cases like filtering by multiple tags, non-existent tags, etc.
+- [x] The code follows the MCP pattern from the calculator example
+  - Maintained consistent parameter handling and service integration
+  - Used proper JSON serialization for responses and error handling
 
 ### Step-by-Step Implementation
-1. [ ] Update the FlashcardService interface to include all methods
-2. [ ] Implement all methods in FlashcardServiceImpl
-3. [ ] Update each handler to use the service
-4. [ ] Update tests to verify correct behavior
-5. [ ] Run the tests with `go test ./cmd/flashcards -v`
+1. [x] Update the FlashcardService interface to include all methods
+   - Added UpdateCard, DeleteCard, and ListCards methods to the interface
+2. [x] Implement all methods in FlashcardServiceImpl
+   - Implemented UpdateCard with field-specific updates that preserve FSRS data
+   - Implemented DeleteCard with proper storage integration and error handling
+   - Implemented ListCards with tag filtering and statistics calculation
+3. [x] Update each handler to use the service
+   - Modified handlers to extract parameters and call corresponding service methods
+   - Added proper error handling and response formatting
+4. [x] Update tests to verify correct behavior
+   - Enhanced TestListCards with multiple filtering scenarios and edge cases
+   - Added verification for all operation outcomes and edge cases
+5. [x] Run the tests with `go test ./cmd/flashcards -v`
+   - Fixed an issue with tag filtering logic to properly handle multiple tags (AND condition)
+   - All tests now pass successfully
 
 ## Task 9: Implement Statistics Calculation
 
