@@ -89,6 +89,13 @@ func TestServerInfoAndToolDescriptions(t *testing.T) {
 			"Use this data to identify patterns in what the student finds challenging",
 			"Maintain an enthusiastic, encouraging tone when discussing the cards",
 		},
+		"help_analyze_learning": {
+			"Review the student's performance across all cards",
+			"Identify patterns in what concepts are challenging",
+			"Suggest new cards that would help with prerequisite knowledge",
+			"Look for fundamental concepts that apply across multiple difficult cards",
+			"Use many emojis and exciting middle-school appropriate language",
+		},
 	}
 
 	// Check each tool's description

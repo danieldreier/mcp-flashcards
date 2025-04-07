@@ -1041,3 +1041,49 @@ func TestListCards(t *testing.T) {
 		t.Logf("Correctly returned empty list for non-existent tag")
 	})
 }
+
+func TestHelpAnalyzeLearning(t *testing.T) {
+	// Setup client
+	c, ctx, cancel, tempFilePath := setupMCPClient(t)
+	defer c.Close()
+	defer cancel()
+	defer os.Remove(tempFilePath)
+
+	// Call the help_analyze_learning tool
+	helpAnalyzeRequest := mcp.CallToolRequest{}
+	helpAnalyzeRequest.Params.Name = "help_analyze_learning"
+	// No parameters required for this tool
+
+	result, err := c.CallTool(ctx, helpAnalyzeRequest)
+	if err != nil {
+		t.Fatalf("Failed to call help_analyze_learning: %v", err)
+	}
+
+	// Check if we got a response
+	if len(result.Content) == 0 {
+		t.Fatalf("No content returned from help_analyze_learning")
+	}
+
+	// Extract the text content
+	textContent, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("Expected TextContent, got %T", result.Content[0])
+	}
+
+	// Parse the JSON response
+	var response struct {
+		Message string `json:"message"`
+	}
+	err = json.Unmarshal([]byte(textContent.Text), &response)
+	if err != nil {
+		t.Fatalf("Failed to parse response JSON: %v", err)
+	}
+
+	// Verify the placeholder message
+	expectedMessage := "Tool 'help_analyze_learning' is defined but not yet implemented."
+	if response.Message != expectedMessage {
+		t.Errorf("Expected message '%s', got '%s'", expectedMessage, response.Message)
+	}
+
+	t.Logf("Successfully called help_analyze_learning tool: %s", response.Message)
+}

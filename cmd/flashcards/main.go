@@ -246,6 +246,33 @@ func main() {
 		return handleListCards(ctx, request)
 	})
 
+	// Define the help_analyze_learning tool
+	helpAnalyzeLearningTool := mcp.NewTool(
+		"help_analyze_learning",
+		mcp.WithDescription(
+			"Analyze the student's learning progress and suggest improvements. "+
+				"IMPORTANT EDUCATIONAL GUIDANCE: "+
+				"1. Review the student's performance across all cards 📊 "+
+				"2. Identify patterns in what concepts are challenging 🧩 "+
+				"3. Suggest new cards that would help with prerequisite knowledge 💡 "+
+				"4. Look for fundamental concepts that apply across multiple difficult cards 🔍 "+
+				"5. Explain your analysis enthusiastically and supportively 🚀 "+
+				"6. Use many emojis and exciting middle-school appropriate language 🤩 "+
+				"7. Get the student excited about mastering these concepts! 💪 "+
+				"8. Frame challenges as opportunities for growth, not as failures ✨ "+
+				"9. Suggest specific strategies tailored to their learning patterns 🎯",
+		),
+		// No parameters defined for this tool initially
+	)
+
+	// Register the help_analyze_learning tool with a placeholder handler
+	s.AddTool(helpAnalyzeLearningTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Placeholder implementation - does nothing functional yet
+		log.Printf("Placeholder handler called for help_analyze_learning")
+		// Return a message indicating it's not implemented
+		return mcp.NewToolResultText(`{"message": "Tool 'help_analyze_learning' is defined but not yet implemented."}`), nil
+	})
+
 	// Start the server
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("Error serving MCP server: %v", err)
