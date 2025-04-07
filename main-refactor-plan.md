@@ -226,11 +226,11 @@ func handleGetDueCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 ```
 
 ### Success Criteria
-- [  ] All handler functions are moved to handlers.go
-- [  ] Imports are correctly set up
-- [  ] Functions access the service layer correctly
-- [  ] Documentation is comprehensive
-- [  ] Tests pass after this change
+- [x] All handler functions are moved to handlers.go
+- [x] Imports are correctly set up
+- [x] Functions access the service layer correctly
+- [x] Documentation is comprehensive
+- [x] Tests pass after this change
 
 ## Task 4: Simplify main.go
 
