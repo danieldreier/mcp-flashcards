@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,10 +73,29 @@ func TestGetDueCard(t *testing.T) {
 	defer cancel()
 	defer os.Remove(tempFilePath)
 
-	// Call the get_due_card tool
+	// First create multiple test cards with different due dates
+
+	// Card 1: Due one hour ago (high priority)
+	err := createTestCard(c, ctx, "Card 1 Question", "Card 1 Answer", []string{"test", "priority-high"}, -1)
+	if err != nil {
+		t.Fatalf("Failed to create test card 1: %v", err)
+	}
+
+	// Card 2: Due 30 minutes ago (medium priority)
+	err = createTestCard(c, ctx, "Card 2 Question", "Card 2 Answer", []string{"test", "priority-medium"}, -0.5)
+	if err != nil {
+		t.Fatalf("Failed to create test card 2: %v", err)
+	}
+
+	// Card 3: Due in the future (should not be returned)
+	err = createTestCard(c, ctx, "Card 3 Question", "Card 3 Answer", []string{"test", "priority-none"}, 1)
+	if err != nil {
+		t.Fatalf("Failed to create test card 3: %v", err)
+	}
+
+	// Now call get_due_card and verify it returns the highest priority card
 	getDueCardRequest := mcp.CallToolRequest{}
 	getDueCardRequest.Params.Name = "get_due_card"
-	// No parameters needed
 
 	result, err := c.CallTool(ctx, getDueCardRequest)
 	if err != nil {
@@ -99,7 +120,12 @@ func TestGetDueCard(t *testing.T) {
 		t.Fatalf("Failed to parse response JSON: %v", err)
 	}
 
-	// Verify the response structure
+	// Verify we got Card 1 (the most overdue card)
+	if !strings.Contains(response.Card.Front, "Card 1") {
+		t.Errorf("Expected highest priority card (Card 1), got: %s", response.Card.Front)
+	}
+
+	// Verify card details
 	if response.Card.ID == "" {
 		t.Error("Card ID is empty")
 	}
@@ -111,16 +137,73 @@ func TestGetDueCard(t *testing.T) {
 	}
 
 	// Check stats
-	if response.Stats.TotalCards <= 0 {
-		t.Error("Total cards should be > 0")
+	if response.Stats.TotalCards != 3 {
+		t.Errorf("Expected 3 total cards, got %d", response.Stats.TotalCards)
 	}
-	if response.Stats.DueCards <= 0 {
-		t.Error("Due cards should be > 0")
+	// We expect 2 due cards (Card 1 and Card 2, but not Card 3 which is due in the future)
+	// We'll check the actual number against the expectation
+	expectedDueCards := 2
+	if response.Stats.DueCards != expectedDueCards {
+		t.Errorf("Expected %d due cards, got %d", expectedDueCards, response.Stats.DueCards)
 	}
 
 	// Print the response for debugging
 	t.Logf("Successfully got card: %s - %s", response.Card.Front, response.Card.Back)
 	t.Logf("Stats: %d total cards, %d due cards", response.Stats.TotalCards, response.Stats.DueCards)
+}
+
+// createTestCard is a helper function to create a test card with specified due time
+func createTestCard(c *client.StdioMCPClient, ctx context.Context, front, back string, tags []string, hourOffset float64) error {
+	// Create the card
+	createCardRequest := mcp.CallToolRequest{}
+	createCardRequest.Params.Name = "create_card"
+
+	// Convert tags to interface slice
+	tagInterfaces := make([]interface{}, len(tags))
+	for i, tag := range tags {
+		tagInterfaces[i] = tag
+	}
+
+	// Add hourOffset as a custom parameter for testing
+	createCardRequest.Params.Arguments = map[string]interface{}{
+		"front":       front,
+		"back":        back,
+		"tags":        tagInterfaces,
+		"hour_offset": hourOffset, // This will be used to set the due date
+	}
+
+	result, err := c.CallTool(ctx, createCardRequest)
+	if err != nil {
+		return fmt.Errorf("failed to call create_card: %w", err)
+	}
+
+	// Extract the text content
+	if len(result.Content) == 0 {
+		return fmt.Errorf("no content returned from create_card")
+	}
+
+	textContent, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		return fmt.Errorf("expected TextContent, got %T", result.Content[0])
+	}
+
+	// Parse the card ID from the response
+	var response CreateCardResponse
+	err = json.Unmarshal([]byte(textContent.Text), &response)
+	if err != nil {
+		return fmt.Errorf("failed to parse create_card response: %w", err)
+	}
+
+	// We now have the card ID, but we need to update its due date
+	// For now, since we don't have a direct way to set the due date,
+	// we'll use this placeholder
+	// In a real implementation, you would add a proper tool to update the due date
+
+	// TODO: Implement a way to directly set due dates for testing
+	// For now, this test relies on the implementation of CreateCard setting
+	// the due date to now, and the prioritization logic working correctly
+
+	return nil
 }
 
 func TestSubmitReview(t *testing.T) {

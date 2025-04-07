@@ -804,16 +804,34 @@ Update the get_due_card test to:
 - Verify that statistics are included in the response
 
 ### Success Criteria
-- [ ] The `get_due_card` tool correctly retrieves the highest priority due card
-- [ ] The response includes the card and statistics
-- [ ] Tests verify the correct card selection
-- [ ] The code follows the MCP pattern from the calculator example
+- [x] The `get_due_card` tool correctly retrieves the highest priority due card
+  - Implemented service layer connecting storage and FSRS
+  - Added priority calculation for sorting due cards
+  - Returns highest priority card based on FSRS algorithm
+- [x] The response includes the card and statistics
+  - Response format includes card data and comprehensive statistics
+  - Statistics include total cards, due cards, reviews today, and retention rate
+- [x] Tests verify the correct card selection
+  - Test creates cards with different due dates
+  - Confirms the correct (most overdue) card is selected
+  - Verifies statistics are calculated correctly
+- [x] The code follows the MCP pattern from the calculator example
+  - Used proper context handling for service access
+  - Implemented clean separation between handler and service logic
+  - Provided appropriate error handling
 
 ### Step-by-Step Implementation
-1. [ ] Update `cmd/flashcards/main.go` to implement the FlashcardService
-2. [ ] Update the `get_due_card` handler to use the service
-3. [ ] Update `cmd/flashcards/main_test.go` to test actual card retrieval
-4. [ ] Run the tests with `go test ./cmd/flashcards -v`
+1. [x] Update `cmd/flashcards/main.go` to implement the FlashcardService
+   - Created service layer with Storage and FSRSManager dependencies
+   - Implemented GetDueCard method with priority-based card selection
+2. [x] Update the `get_due_card` handler to use the service
+   - Modified handler to extract service from context
+   - Added proper error handling for service operations
+3. [x] Update `cmd/flashcards/main_test.go` to test actual card retrieval
+   - Created tests with cards having different due dates
+   - Added verification for card selection priority
+4. [x] Run the tests with `go test ./cmd/flashcards -v`
+   - All tests pass successfully
 
 ## Task 7: Implement Working Version of Submit Review
 

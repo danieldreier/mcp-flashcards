@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"time"
 
+	"github.com/danieldreier/mcp-flashcards/internal/fsrs"
 	"github.com/danieldreier/mcp-flashcards/internal/storage"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/open-spaced-repetition/go-fsrs"
+	gofsrs "github.com/open-spaced-repetition/go-fsrs"
 )
 
 // Card represents a flashcard with content and FSRS algorithm data
@@ -22,9 +24,9 @@ type Card struct {
 	Back      string    `json:"back"`
 	CreatedAt time.Time `json:"created_at"`
 	Tags      []string  `json:"tags,omitempty"`
-	// Algorithm data - from fsrs.Card which contains:
+	// Algorithm data - from go-fsrs package which contains:
 	// Due, Stability, Difficulty, ElapsedDays, ScheduledDays, Reps, Lapses, State, LastReview
-	FSRS fsrs.Card `json:"fsrs"`
+	FSRS gofsrs.Card `json:"fsrs"`
 }
 
 // CardStats represents statistics for flashcard review
@@ -72,39 +74,37 @@ type ListCardsResponse struct {
 
 // handleGetDueCard handles the get_due_card tool request
 func handleGetDueCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// Create a new FSRS card
-	fsrsCard := fsrs.NewCard()
-	fsrsCard.Due = time.Now().Add(-1 * time.Hour) // Due 1 hour ago
-
-	// Create a hardcoded response
-	response := CardResponse{
-		Card: Card{
-			ID:        "card1",
-			Front:     "What is the capital of France?",
-			Back:      "Paris",
-			CreatedAt: time.Now().Add(-24 * time.Hour), // Created yesterday
-			Tags:      []string{"geography", "europe"},
-			FSRS:      fsrsCard,
-		},
-		Stats: CardStats{
-			TotalCards:    10,
-			DueCards:      3,
-			ReviewsToday:  2,
-			RetentionRate: 0.85,
-		},
+	// Get the service from context
+	s, ok := ctx.Value("service").(*FlashcardService)
+	if !ok || s == nil {
+		return mcp.NewToolResultText("Error: Service not available"), nil
 	}
 
-	// We need to return the response as a structured result
-	// For now, we'll convert the response to a simple text result
-	// which is better supported across different MCP clients
+	// Call service method to get due card
+	card, stats, err := s.GetDueCard()
+	if err != nil {
+		// If no cards are due, return a friendly message
+		if err.Error() == "no cards due for review" {
+			return mcp.NewToolResultText(`{"error": "No cards due for review"}`), nil
+		}
+		// For other errors, return the error message
+		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Error getting due card: %v"}`, err)), nil
+	}
+
+	// Create response
+	response := CardResponse{
+		Card:  card,
+		Stats: stats,
+	}
+
+	// Convert to JSON
 	jsonBytes, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 
-	// Return using the helper method for text results
-	result := mcp.NewToolResultText(string(jsonBytes))
-	return result, nil
+	// Return as text result
+	return mcp.NewToolResultText(string(jsonBytes)), nil
 }
 
 // handleSubmitReview handles the submit_review tool request
@@ -147,13 +147,118 @@ func handleSubmitReview(ctx context.Context, request mcp.CallToolRequest) (*mcp.
 
 // FlashcardService manages operations for flashcards with storage
 type FlashcardService struct {
-	Storage storage.Storage
+	Storage     storage.Storage
+	FSRSManager fsrs.FSRSManager
 }
 
 // NewFlashcardService creates a new FlashcardService
 func NewFlashcardService(storage storage.Storage) *FlashcardService {
 	return &FlashcardService{
-		Storage: storage,
+		Storage:     storage,
+		FSRSManager: fsrs.NewFSRSManager(),
+	}
+}
+
+// GetDueCard returns the next card due for review with statistics
+func (s *FlashcardService) GetDueCard() (Card, CardStats, error) {
+	// Get all cards from storage
+	cards, err := s.Storage.ListCards(nil)
+	if err != nil {
+		return Card{}, CardStats{}, fmt.Errorf("error listing cards: %w", err)
+	}
+
+	// Current time for priority calculation
+	now := time.Now()
+
+	// Find due cards and calculate priority
+	var dueCards []struct {
+		card     Card
+		priority float64
+	}
+
+	for _, storageCard := range cards {
+		// Convert storage.Card to our Card type
+		card := Card{
+			ID:        storageCard.ID,
+			Front:     storageCard.Front,
+			Back:      storageCard.Back,
+			CreatedAt: storageCard.CreatedAt,
+			Tags:      storageCard.Tags,
+			FSRS:      storageCard.FSRS,
+		}
+
+		// Consider cards due now or in the past
+		if !card.FSRS.Due.After(now) {
+			priority := s.FSRSManager.GetReviewPriority(card.FSRS.State, card.FSRS.Due, now)
+			dueCards = append(dueCards, struct {
+				card     Card
+				priority float64
+			}{card, priority})
+		}
+	}
+
+	// Sort by priority (highest first)
+	sort.Slice(dueCards, func(i, j int) bool {
+		return dueCards[i].priority > dueCards[j].priority
+	})
+
+	// Return highest priority card or error if none due
+	if len(dueCards) == 0 {
+		return Card{}, CardStats{}, fmt.Errorf("no cards due for review")
+	}
+
+	// Calculate statistics
+	stats := s.calculateStats(cards)
+
+	return dueCards[0].card, stats, nil
+}
+
+// calculateStats calculates statistics from card and review data
+func (s *FlashcardService) calculateStats(cards []storage.Card) CardStats {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	// Count total and due cards
+	totalCards := len(cards)
+	dueCards := 0
+	for _, card := range cards {
+		if !card.FSRS.Due.After(now) {
+			dueCards++
+		}
+	}
+
+	// Get today's reviews and count correct answers
+	var reviews []storage.Review
+	for _, card := range cards {
+		cardReviews, err := s.Storage.GetCardReviews(card.ID)
+		if err == nil {
+			for _, review := range cardReviews {
+				if !review.Timestamp.Before(today) {
+					reviews = append(reviews, review)
+				}
+			}
+		}
+	}
+
+	// Calculate retention rate (correct answers / total reviews)
+	correctReviews := 0
+	for _, review := range reviews {
+		// Rating 3 (Good) or 4 (Easy) is considered correct
+		if review.Rating >= gofsrs.Good {
+			correctReviews++
+		}
+	}
+
+	retentionRate := 0.0
+	if len(reviews) > 0 {
+		retentionRate = float64(correctReviews) / float64(len(reviews)) * 100.0
+	}
+
+	return CardStats{
+		TotalCards:    totalCards,
+		DueCards:      dueCards,
+		ReviewsToday:  len(reviews),
+		RetentionRate: retentionRate,
 	}
 }
 
@@ -179,6 +284,7 @@ func handleCreateCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 			}
 		}
 	}
+
 	// Get the storage from server context
 	s, ok := ctx.Value("service").(*FlashcardService)
 	if !ok || s == nil {
@@ -189,6 +295,18 @@ func handleCreateCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 	newCard, err := s.Storage.CreateCard(front, back, tags)
 	if err != nil {
 		return mcp.NewToolResultText(fmt.Sprintf("Error creating card: %v", err)), nil
+	}
+
+	// Check for optional hour_offset parameter (for testing only)
+	if hourOffsetFloat, ok := request.Params.Arguments["hour_offset"].(float64); ok {
+		// Set due date based on hour offset (relative to now)
+		hourOffsetDuration := time.Duration(hourOffsetFloat * float64(time.Hour))
+		newCard.FSRS.Due = time.Now().Add(hourOffsetDuration)
+
+		// Update the card in storage
+		if err := s.Storage.UpdateCard(newCard); err != nil {
+			log.Printf("Warning: Failed to update card due date: %v", err)
+		}
 	}
 
 	// Save changes to disk
@@ -293,7 +411,7 @@ func handleListCards(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 		Back:      "Paris",
 		CreatedAt: time.Now().Add(-24 * time.Hour),
 		Tags:      []string{"geography", "europe"},
-		FSRS:      fsrs.NewCard(),
+		FSRS:      gofsrs.NewCard(),
 	}
 
 	card2 := Card{
@@ -302,7 +420,7 @@ func handleListCards(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 		Back:      "Tokyo",
 		CreatedAt: time.Now().Add(-48 * time.Hour),
 		Tags:      []string{"geography", "asia"},
-		FSRS:      fsrs.NewCard(),
+		FSRS:      gofsrs.NewCard(),
 	}
 
 	card3 := Card{
@@ -311,7 +429,7 @@ func handleListCards(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 		Back:      "Brasília",
 		CreatedAt: time.Now().Add(-72 * time.Hour),
 		Tags:      []string{"geography", "south-america"},
-		FSRS:      fsrs.NewCard(),
+		FSRS:      gofsrs.NewCard(),
 	}
 
 	// Create a list of cards (for now, hardcoded)
