@@ -81,7 +81,7 @@ Always maintain an excited, encouraging tone throughout the entire session using
 server := mcp.NewServer(
     "Flashcards MCP",
     "1.0.0",
-    mcp.WithServerInfo(serverInfo),
+    mcp.WithInstructions(serverInfo), // Corrected from WithServerInfo
 )
 ```
 
@@ -159,8 +159,8 @@ submitReviewTool := mcp.NewTool(
     mcp.WithNumber("rating",
         mcp.Required(),
         mcp.Description("Rating from 1-4 (Again=1, Hard=2, Good=3, Easy=4)"),
-        mcp.MinValue(1),
-        mcp.MaxValue(4),
+        mcp.Min(1), // Corrected from MinValue
+        mcp.Max(4), // Corrected from MaxValue
     ),
     mcp.WithString("answer",
         mcp.Description("Final record of the student's answer (optional)"),
