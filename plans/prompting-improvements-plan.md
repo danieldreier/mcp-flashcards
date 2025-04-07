@@ -239,8 +239,67 @@ Outline a manual testing strategy to validate the prompting improvements. This s
 - [ ] The plan includes steps to test the LLM's adherence to each phase of the specified educational workflow (Presentation, Response, Evaluation, Rating, Transition, Completion, Creation).
 - [ ] The plan includes checks for the specified tone and emoji usage.
 
+## Task 4: Implement the `help_analyze_learning` Tool Functionality
+
+### Background and Context
+Task 2 defined and registered the `help_analyze_learning` tool with a placeholder handler that returned a "not yet implemented" message. This task involves implementing the actual functionality to analyze student learning patterns by identifying low-scoring cards, finding common patterns among difficult cards, and returning data that helps LLMs provide personalized learning recommendations.
+
+### My Task
+1. Update the `help_analyze_learning` handler in `cmd/flashcards/handlers.go` to perform analysis on the student's learning progress.
+2. Create necessary data structures in `cmd/flashcards/models.go` to represent the analysis results.
+3. Update the existing test to verify the tool works correctly with real data.
+
+### Files to Create/Modify
+1. `cmd/flashcards/handlers.go` - Replace the placeholder handler with the actual implementation.
+2. `cmd/flashcards/models.go` - Add structures to represent the analysis response.
+3. `cmd/flashcards/main.go` - Update the tool registration to use the implemented handler.
+4. `cmd/flashcards/main_test.go` - Update tests to verify the implemented functionality.
+
+### Implementation Details
+
+#### 1. Create Data Model for Analysis Response
+Added a new `AnalyzeLearningResponse` struct to `models.go` that includes:
+- Low-scoring cards with their review history and average ratings
+- Common tags among difficult cards
+- Overall statistics for learning progress
+- Total reviews count
+
+#### 2. Implement Analysis Logic
+Created the `handleHelpAnalyzeLearning` function in `handlers.go` with the following features:
+- Fetches all cards and their review history from storage
+- Analyzes each card's performance based on ratings
+- Identifies cards with low average scores (≤ 2.5)
+- Finds common tags among difficult cards
+- Calculates statistics to help identify patterns
+- Formats the response to guide LLM analysis
+
+#### 3. Update Main File to Use the Implementation
+Updated the tool registration in `main.go` to use the new handler instead of the placeholder.
+
+#### 4. Update Tests
+Enhanced the `TestHelpAnalyzeLearning` test to:
+- Create test cards with varying difficulty levels
+- Submit reviews with different ratings
+- Call the `help_analyze_learning` tool
+- Verify the response format and content
+- Check for correct identification of difficult cards
+
+### Success Criteria
+- [x] The `help_analyze_learning` handler is fully implemented to analyze learning progress.
+- [x] The handler returns low-scoring cards, common tags, and statistics in a structured format.
+- [x] Tests verify the tool can identify patterns in learning difficulties.
+- [x] All existing tests pass.
+
+#### Implementation Notes
+- Implemented a comprehensive analysis system that sorts cards by average rating
+- Added tag frequency analysis to help identify common themes in difficult cards
+- Limited results to the 10 most challenging cards to keep responses focused
+- Ensured the response format provides enough context for LLMs to make meaningful recommendations
+- Added comprehensive tests that create cards, submit reviews, and verify the analysis results
+
 ## Implementation Sequence Summary
 
 1.  **Task 1**: Implement changes to `serverInfo` and existing tool descriptions in `cmd/flashcards/main.go`. Verify text application and ensure existing tests pass.
 2.  **Task 2**: Define and register the new `help_analyze_learning` tool with a placeholder handler in `cmd/flashcards/main.go`. Add a test to verify the placeholder.
 3.  **Task 3**: (Documentation Complete) The manual testing strategy is defined within this plan. Execution occurs post-deployment.
+4.  **Task 4**: Implement the actual functionality for the `help_analyze_learning` tool, replacing the placeholder with a comprehensive learning analysis system.

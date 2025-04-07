@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -307,6 +308,196 @@ func handleListCards(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 	}
 
 	jsonBytes, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+
+	return mcp.NewToolResultText(string(jsonBytes)), nil
+}
+
+// handleHelpAnalyzeLearning analyzes the student's learning progress by identifying
+// low-scoring cards, finding patterns in difficult content, and providing data
+// that assists the LLM in making personalized learning recommendations.
+func handleHelpAnalyzeLearning(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Get the service from context
+	s, ok := ctx.Value("service").(*FlashcardService)
+	if !ok || s == nil {
+		return mcp.NewToolResultText("Error: Service not available"), nil
+	}
+
+	// Get all cards from storage to analyze
+	allCards, err := s.Storage.ListCards(nil)
+	if err != nil {
+		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Error listing cards: %v"}`, err)), nil
+	}
+
+	// Calculate overall stats
+	stats := s.calculateStats(allCards)
+
+	// If there are no cards, return early with empty result
+	if len(allCards) == 0 {
+		response := AnalyzeLearningResponse{
+			LowScoringCards: []struct {
+				Card        Card         `json:"card"`
+				Reviews     []CardReview `json:"reviews"`
+				AvgRating   float64      `json:"avg_rating"`
+				ReviewCount int          `json:"review_count"`
+			}{},
+			CommonTags:   []string{},
+			TotalReviews: 0,
+			Stats:        stats,
+		}
+
+		jsonBytes, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return mcp.NewToolResultText(string(jsonBytes)), nil
+	}
+
+	// Analyze each card's reviews to find difficult cards
+	type cardAnalysis struct {
+		Card        Card
+		Reviews     []CardReview
+		AvgRating   float64
+		ReviewCount int
+	}
+
+	var analyzedCards []cardAnalysis
+	tagFrequency := make(map[string]int)
+	totalReviews := 0
+
+	for _, storageCard := range allCards {
+		// Convert storage.Card to our Card type
+		card := Card{
+			ID:        storageCard.ID,
+			Front:     storageCard.Front,
+			Back:      storageCard.Back,
+			CreatedAt: storageCard.CreatedAt,
+			Tags:      storageCard.Tags,
+			FSRS:      storageCard.FSRS,
+		}
+
+		// Count tags for finding common patterns
+		for _, tag := range card.Tags {
+			tagFrequency[tag]++
+		}
+
+		// Get reviews for this card
+		cardReviews, err := s.Storage.GetCardReviews(card.ID)
+		if err != nil {
+			continue // Skip this card if reviews can't be retrieved
+		}
+
+		// If there are no reviews, skip this card
+		if len(cardReviews) == 0 {
+			continue
+		}
+
+		// Convert storage.Review to CardReview for response
+		simplifiedReviews := make([]CardReview, 0, len(cardReviews))
+		ratingSum := 0
+		for _, review := range cardReviews {
+			ratingInt := int(review.Rating)
+			ratingSum += ratingInt
+			totalReviews++
+
+			simplifiedReviews = append(simplifiedReviews, CardReview{
+				Rating:    ratingInt,
+				Timestamp: review.Timestamp,
+				Answer:    review.Answer,
+			})
+		}
+
+		// Calculate average rating
+		avgRating := float64(ratingSum) / float64(len(cardReviews))
+
+		// Store the analysis for this card
+		analyzedCards = append(analyzedCards, cardAnalysis{
+			Card:        card,
+			Reviews:     simplifiedReviews,
+			AvgRating:   avgRating,
+			ReviewCount: len(cardReviews),
+		})
+	}
+
+	// Sort cards by average rating (lowest first)
+	sort.Slice(analyzedCards, func(i, j int) bool {
+		return analyzedCards[i].AvgRating < analyzedCards[j].AvgRating
+	})
+
+	// Filter for low-scoring cards (avg rating <= 2.5)
+	var lowScoringCards []cardAnalysis
+	for _, analysis := range analyzedCards {
+		if analysis.AvgRating <= 2.5 && analysis.ReviewCount > 0 {
+			lowScoringCards = append(lowScoringCards, analysis)
+		}
+
+		// Limit to 10 most difficult cards
+		if len(lowScoringCards) >= 10 {
+			break
+		}
+	}
+
+	// Find common tags among low-scoring cards
+	lowScoringTagFrequency := make(map[string]int)
+	for _, analysis := range lowScoringCards {
+		for _, tag := range analysis.Card.Tags {
+			lowScoringTagFrequency[tag]++
+		}
+	}
+
+	// Sort tags by frequency for low-scoring cards
+	type tagCount struct {
+		Tag   string
+		Count int
+	}
+	var commonTags []tagCount
+	for tag, count := range lowScoringTagFrequency {
+		if count > 1 { // Only include tags that appear in multiple cards
+			commonTags = append(commonTags, tagCount{Tag: tag, Count: count})
+		}
+	}
+	sort.Slice(commonTags, func(i, j int) bool {
+		return commonTags[i].Count > commonTags[j].Count
+	})
+
+	// Extract just the tag names in order of frequency
+	commonTagNames := make([]string, 0, len(commonTags))
+	for _, tc := range commonTags {
+		commonTagNames = append(commonTagNames, tc.Tag)
+	}
+
+	// Prepare response data structure
+	responseData := AnalyzeLearningResponse{
+		LowScoringCards: make([]struct {
+			Card        Card         `json:"card"`
+			Reviews     []CardReview `json:"reviews"`
+			AvgRating   float64      `json:"avg_rating"`
+			ReviewCount int          `json:"review_count"`
+		}, len(lowScoringCards)),
+		CommonTags:   commonTagNames,
+		TotalReviews: totalReviews,
+		Stats:        stats,
+	}
+
+	// Fill in the low-scoring cards data
+	for i, analysis := range lowScoringCards {
+		responseData.LowScoringCards[i] = struct {
+			Card        Card         `json:"card"`
+			Reviews     []CardReview `json:"reviews"`
+			AvgRating   float64      `json:"avg_rating"`
+			ReviewCount int          `json:"review_count"`
+		}{
+			Card:        analysis.Card,
+			Reviews:     analysis.Reviews,
+			AvgRating:   analysis.AvgRating,
+			ReviewCount: analysis.ReviewCount,
+		}
+	}
+
+	// Return formatted JSON response
+	jsonBytes, err := json.MarshalIndent(responseData, "", "  ")
 	if err != nil {
 		return nil, err
 	}

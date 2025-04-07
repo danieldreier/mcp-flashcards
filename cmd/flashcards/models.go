@@ -63,3 +63,23 @@ type ListCardsResponse struct {
 	Cards []Card    `json:"cards"`
 	Stats CardStats `json:"stats,omitempty"`
 }
+
+// AnalyzeLearningResponse represents the response structure for help_analyze_learning
+type AnalyzeLearningResponse struct {
+	LowScoringCards []struct {
+		Card        Card         `json:"card"`
+		Reviews     []CardReview `json:"reviews"`
+		AvgRating   float64      `json:"avg_rating"`
+		ReviewCount int          `json:"review_count"`
+	} `json:"low_scoring_cards"`
+	CommonTags   []string  `json:"common_tags"`
+	TotalReviews int       `json:"total_reviews"`
+	Stats        CardStats `json:"stats"`
+}
+
+// CardReview represents a simplified review for analysis
+type CardReview struct {
+	Rating    int       `json:"rating"`
+	Timestamp time.Time `json:"timestamp"`
+	Answer    string    `json:"answer,omitempty"`
+}

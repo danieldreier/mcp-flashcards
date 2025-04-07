@@ -265,12 +265,10 @@ func main() {
 		// No parameters defined for this tool initially
 	)
 
-	// Register the help_analyze_learning tool with a placeholder handler
+	// Register the help_analyze_learning tool with the implemented handler
 	s.AddTool(helpAnalyzeLearningTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Placeholder implementation - does nothing functional yet
-		log.Printf("Placeholder handler called for help_analyze_learning")
-		// Return a message indicating it's not implemented
-		return mcp.NewToolResultText(`{"message": "Tool 'help_analyze_learning' is defined but not yet implemented."}`), nil
+		// Pass the context with service to the handler
+		return handleHelpAnalyzeLearning(ctx, request)
 	})
 
 	// Start the server

@@ -1049,10 +1049,69 @@ func TestHelpAnalyzeLearning(t *testing.T) {
 	defer cancel()
 	defer os.Remove(tempFilePath)
 
-	// Call the help_analyze_learning tool
+	// Create some test cards with different ratings
+
+	// Card 1: Create with easy material, will give good rating
+	err := createTestCard(c, ctx, "What is 2+2?", "4", []string{"math", "easy"}, -1)
+	if err != nil {
+		t.Fatalf("Failed to create test card 1: %v", err)
+	}
+
+	// Card 2: Create with difficult material, will give low rating
+	err = createTestCard(c, ctx, "Explain quantum entanglement", "A quantum phenomenon where pairs of particles remain connected", []string{"physics", "difficult"}, -1)
+	if err != nil {
+		t.Fatalf("Failed to create test card 2: %v", err)
+	}
+
+	// Card 3: Another difficult card
+	err = createTestCard(c, ctx, "What is the capital of Kazakhstan?", "Astana (now Nur-Sultan)", []string{"geography", "difficult"}, -1)
+	if err != nil {
+		t.Fatalf("Failed to create test card 3: %v", err)
+	}
+
+	// Get the cards to obtain their IDs
+	listCardsRequest := mcp.CallToolRequest{}
+	listCardsRequest.Params.Name = "list_cards"
+
+	listResult, err := c.CallTool(ctx, listCardsRequest)
+	if err != nil {
+		t.Fatalf("Failed to call list_cards: %v", err)
+	}
+
+	// Parse the list cards response
+	var listResponse ListCardsResponse
+	err = json.Unmarshal([]byte(listResult.Content[0].(mcp.TextContent).Text), &listResponse)
+	if err != nil {
+		t.Fatalf("Failed to parse list_cards response: %v", err)
+	}
+
+	// Add reviews for each card
+	for _, card := range listResponse.Cards {
+		var rating float64
+		if strings.Contains(card.Front, "2+2") {
+			rating = 4.0 // Easy card gets high rating
+		} else {
+			rating = 1.0 // Difficult cards get low rating
+		}
+
+		// Submit a review for this card
+		submitRequest := mcp.CallToolRequest{}
+		submitRequest.Params.Name = "submit_review"
+		submitRequest.Params.Arguments = map[string]interface{}{
+			"card_id": card.ID,
+			"rating":  rating,
+			"answer":  "Test answer for " + card.Front,
+		}
+
+		_, err := c.CallTool(ctx, submitRequest)
+		if err != nil {
+			t.Fatalf("Failed to submit review for card %s: %v", card.ID, err)
+		}
+	}
+
+	// Now call the help_analyze_learning tool
 	helpAnalyzeRequest := mcp.CallToolRequest{}
 	helpAnalyzeRequest.Params.Name = "help_analyze_learning"
-	// No parameters required for this tool
 
 	result, err := c.CallTool(ctx, helpAnalyzeRequest)
 	if err != nil {
@@ -1070,20 +1129,63 @@ func TestHelpAnalyzeLearning(t *testing.T) {
 		t.Fatalf("Expected TextContent, got %T", result.Content[0])
 	}
 
-	// Parse the JSON response
-	var response struct {
-		Message string `json:"message"`
-	}
+	// Parse the JSON response as an AnalyzeLearningResponse
+	var response AnalyzeLearningResponse
 	err = json.Unmarshal([]byte(textContent.Text), &response)
 	if err != nil {
 		t.Fatalf("Failed to parse response JSON: %v", err)
 	}
 
-	// Verify the placeholder message
-	expectedMessage := "Tool 'help_analyze_learning' is defined but not yet implemented."
-	if response.Message != expectedMessage {
-		t.Errorf("Expected message '%s', got '%s'", expectedMessage, response.Message)
+	// Verify the response structure and content
+	// Should have at least 2 low-scoring cards (the difficult ones)
+	if len(response.LowScoringCards) < 2 {
+		t.Errorf("Expected at least 2 low-scoring cards, got %d", len(response.LowScoringCards))
 	}
 
-	t.Logf("Successfully called help_analyze_learning tool: %s", response.Message)
+	// Should have identified "difficult" as a common tag
+	foundDifficultTag := false
+	for _, tag := range response.CommonTags {
+		if tag == "difficult" {
+			foundDifficultTag = true
+			break
+		}
+	}
+	if !foundDifficultTag && len(response.LowScoringCards) > 0 {
+		t.Errorf("Expected 'difficult' to be identified as a common tag, got: %v", response.CommonTags)
+	}
+
+	// Total reviews should match our submitted reviews (3 cards)
+	if response.TotalReviews != 3 {
+		t.Errorf("Expected 3 total reviews, got %d", response.TotalReviews)
+	}
+
+	// Stats should have correct total cards
+	if response.Stats.TotalCards != 3 {
+		t.Errorf("Expected 3 total cards in stats, got %d", response.Stats.TotalCards)
+	}
+
+	// Verify at least one low-scoring card has expected data
+	for _, cardData := range response.LowScoringCards {
+		// Each card should have review data
+		if len(cardData.Reviews) == 0 {
+			t.Errorf("Expected card %s to have review data", cardData.Card.ID)
+		}
+
+		// Card with rating 1.0 should have avgRating of 1.0
+		if cardData.AvgRating == 1.0 {
+			// Found a low-scoring card, check if it has the difficult tag
+			hasTag := false
+			for _, tag := range cardData.Card.Tags {
+				if tag == "difficult" {
+					hasTag = true
+					break
+				}
+			}
+			if !hasTag {
+				t.Errorf("Expected low-scoring card to have 'difficult' tag, got: %v", cardData.Card.Tags)
+			}
+		}
+	}
+
+	t.Logf("Successfully called help_analyze_learning tool and verified response")
 }
