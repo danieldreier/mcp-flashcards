@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
+	"fmt"
 	"log"
+	"os"
 	"time"
 
+	"github.com/danieldreier/mcp-flashcards/internal/storage"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/open-spaced-repetition/go-fsrs"
@@ -45,7 +49,7 @@ type ReviewResponse struct {
 
 // CreateCardResponse represents the response structure for create_card
 type CreateCardResponse struct {
-	Card Card `json:"card"`
+	Card storage.Card `json:"card"`
 }
 
 // UpdateCardResponse represents the response structure for update_card
@@ -62,8 +66,8 @@ type DeleteCardResponse struct {
 
 // ListCardsResponse represents the response structure for list_cards
 type ListCardsResponse struct {
-	Cards []Card    `json:"cards"`
-	Stats CardStats `json:"stats,omitempty"`
+	Cards []storage.Card `json:"cards"`
+	Stats CardStats      `json:"stats,omitempty"`
 }
 
 // handleGetDueCard handles the get_due_card tool request
@@ -141,6 +145,18 @@ func handleSubmitReview(ctx context.Context, request mcp.CallToolRequest) (*mcp.
 	return mcp.NewToolResultText(string(jsonBytes)), nil
 }
 
+// FlashcardService manages operations for flashcards with storage
+type FlashcardService struct {
+	Storage storage.Storage
+}
+
+// NewFlashcardService creates a new FlashcardService
+func NewFlashcardService(storage storage.Storage) *FlashcardService {
+	return &FlashcardService{
+		Storage: storage,
+	}
+}
+
 // handleCreateCard handles the create_card tool request
 func handleCreateCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// Extract required parameters
@@ -163,18 +179,21 @@ func handleCreateCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 			}
 		}
 	}
+	// Get the storage from server context
+	s, ok := ctx.Value("service").(*FlashcardService)
+	if !ok || s == nil {
+		return mcp.NewToolResultText("Error: Service not available"), nil
+	}
 
-	// Create a new FSRS card
-	fsrsCard := fsrs.NewCard()
+	// Create the card in storage
+	newCard, err := s.Storage.CreateCard(front, back, tags)
+	if err != nil {
+		return mcp.NewToolResultText(fmt.Sprintf("Error creating card: %v", err)), nil
+	}
 
-	// Create a hardcoded response with the provided front/back but hardcoded ID
-	newCard := Card{
-		ID:        "new-card-123",
-		Front:     front,
-		Back:      back,
-		CreatedAt: time.Now(),
-		Tags:      tags,
-		FSRS:      fsrsCard,
+	// Save changes to disk
+	if err := s.Storage.Save(); err != nil {
+		log.Printf("Warning: Failed to save storage after creating card: %v", err)
 	}
 
 	response := CreateCardResponse{
@@ -322,9 +341,21 @@ func handleListCards(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 		}
 	}
 
-	// Create response
+	// Create response - converting Card to storage.Card
+	var filteredStorageCards []storage.Card
+	for _, card := range filteredCards {
+		filteredStorageCards = append(filteredStorageCards, storage.Card{
+			ID:        card.ID,
+			Front:     card.Front,
+			Back:      card.Back,
+			CreatedAt: card.CreatedAt,
+			Tags:      card.Tags,
+			FSRS:      card.FSRS,
+		})
+	}
+
 	response := ListCardsResponse{
-		Cards: filteredCards,
+		Cards: filteredStorageCards,
 	}
 
 	// Include stats if requested
@@ -346,13 +377,31 @@ func handleListCards(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 }
 
 func main() {
+	// Parse command-line flags
+	filePath := flag.String("file", "./flashcards.json", "Path to flashcard data file")
+	flag.Parse()
+
+	// Initialize storage
+	fileStorage := storage.NewFileStorage(*filePath)
+	if err := fileStorage.Load(); err != nil {
+		fmt.Printf("Error loading storage: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Create a new MCP server
 	s := server.NewMCPServer(
 		"Flashcards MCP",
 		"1.0.0",
 		server.WithResourceCapabilities(true, true), // Resource capabilities for subscribe and listChanged
+		server.WithToolCapabilities(true),           // Enable tool capabilities
 		server.WithLogging(),                        // Enable logging for the server
 	)
+
+	// Initialize the flashcard service
+	flashcardService := NewFlashcardService(fileStorage)
+
+	// Create context with the service for tool handlers
+	ctx := context.WithValue(context.Background(), "service", flashcardService)
 
 	// Define the get_due_card tool
 	getDueCardTool := mcp.NewTool("get_due_card",
@@ -436,12 +485,25 @@ func main() {
 	)
 
 	// Register all tools with their handlers
-	s.AddTool(getDueCardTool, handleGetDueCard)
-	s.AddTool(submitReviewTool, handleSubmitReview)
-	s.AddTool(createCardTool, handleCreateCard)
-	s.AddTool(updateCardTool, handleUpdateCard)
-	s.AddTool(deleteCardTool, handleDeleteCard)
-	s.AddTool(listCardsTool, handleListCards)
+	s.AddTool(getDueCardTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Pass the context with service to the handler
+		return handleGetDueCard(ctx, request)
+	})
+	s.AddTool(submitReviewTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return handleSubmitReview(ctx, request)
+	})
+	s.AddTool(createCardTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return handleCreateCard(ctx, request)
+	})
+	s.AddTool(updateCardTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return handleUpdateCard(ctx, request)
+	})
+	s.AddTool(deleteCardTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return handleDeleteCard(ctx, request)
+	})
+	s.AddTool(listCardsTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return handleListCards(ctx, request)
+	})
 
 	// Start the server
 	if err := server.ServeStdio(s); err != nil {

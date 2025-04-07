@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,21 +12,33 @@ import (
 )
 
 // setupMCPClient creates and initializes a new MCP client for testing
-func setupMCPClient(t *testing.T) (*client.StdioMCPClient, context.Context, context.CancelFunc) {
-	// Get the path to a temporary file for the binary
-	// (not actually used, just a placeholder)
-	tmpPath := filepath.Join(os.TempDir(), "flashcards")
-	_ = os.WriteFile(tmpPath, []byte{}, 0755)
+func setupMCPClient(t *testing.T) (*client.StdioMCPClient, context.Context, context.CancelFunc, string) {
+	// Create temporary storage file for testing
+	tempFile, err := os.CreateTemp("", "flashcards-test-*.json")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	tempFile.Close()
+	tempFilePath := tempFile.Name()
+
+	// Initialize with an empty JSON array to make it a valid JSON file
+	err = os.WriteFile(tempFilePath, []byte("{}"), 0644)
+	if err != nil {
+		t.Fatalf("Failed to initialize temp file: %v", err)
+	}
 
 	// Create a client that connects to our flashcards server
-	// Since we don't have a separate binary yet, we'll use "go run" to run the current directory
+	// Pass the temporary file path as a command-line argument
 	c, err := client.NewStdioMCPClient(
 		"go",
 		[]string{}, // Empty ENV
 		"run",
 		".",
+		"-file",
+		tempFilePath,
 	)
 	if err != nil {
+		os.Remove(tempFilePath)
 		t.Fatalf("Failed to create client: %v", err)
 	}
 
@@ -46,17 +57,19 @@ func setupMCPClient(t *testing.T) (*client.StdioMCPClient, context.Context, cont
 	if err != nil {
 		cancel()
 		c.Close()
+		os.Remove(tempFilePath)
 		t.Fatalf("Failed to initialize: %v", err)
 	}
 
-	return c, ctx, cancel
+	return c, ctx, cancel, tempFilePath
 }
 
 func TestGetDueCard(t *testing.T) {
 	// Setup client
-	c, ctx, cancel := setupMCPClient(t)
+	c, ctx, cancel, tempFilePath := setupMCPClient(t)
 	defer c.Close()
 	defer cancel()
+	defer os.Remove(tempFilePath)
 
 	// Call the get_due_card tool
 	getDueCardRequest := mcp.CallToolRequest{}
@@ -112,9 +125,10 @@ func TestGetDueCard(t *testing.T) {
 
 func TestSubmitReview(t *testing.T) {
 	// Setup client
-	c, ctx, cancel := setupMCPClient(t)
+	c, ctx, cancel, tempFilePath := setupMCPClient(t)
 	defer c.Close()
 	defer cancel()
+	defer os.Remove(tempFilePath)
 
 	// Call the submit_review tool
 	submitReviewRequest := mcp.CallToolRequest{}
@@ -161,10 +175,11 @@ func TestSubmitReview(t *testing.T) {
 }
 
 func TestCreateCard(t *testing.T) {
-	// Setup client
-	c, ctx, cancel := setupMCPClient(t)
+	// Setup client with temp storage file
+	c, ctx, cancel, tempFilePath := setupMCPClient(t)
 	defer c.Close()
 	defer cancel()
+	defer os.Remove(tempFilePath)
 
 	// Call the create_card tool
 	createCardRequest := mcp.CallToolRequest{}
@@ -212,15 +227,41 @@ func TestCreateCard(t *testing.T) {
 		t.Errorf("Expected 2 tags, got: %d", len(response.Card.Tags))
 	}
 
-	// Print the response for debugging
-	t.Logf("Successfully created card: %s with ID: %s", response.Card.Front, response.Card.ID)
+	// Verify the card was actually stored in the file
+	fileContent, err := os.ReadFile(tempFilePath)
+	if err != nil {
+		t.Fatalf("Failed to read storage file: %v", err)
+	}
+
+	// Check if file is not empty
+	if len(fileContent) == 0 {
+		t.Fatal("Storage file is empty")
+	}
+
+	// Parse the storage file contents
+	var storageData struct {
+		Cards map[string]json.RawMessage `json:"cards"`
+	}
+
+	err = json.Unmarshal(fileContent, &storageData)
+	if err != nil {
+		t.Fatalf("Failed to parse storage file: %v", err)
+	}
+
+	// Check if our card ID exists in the storage
+	if _, exists := storageData.Cards[response.Card.ID]; !exists {
+		t.Errorf("Card with ID %s not found in storage file", response.Card.ID)
+	}
+
+	t.Logf("Successfully created and persisted card: %s with ID: %s", response.Card.Front, response.Card.ID)
 }
 
 func TestUpdateCard(t *testing.T) {
 	// Setup client
-	c, ctx, cancel := setupMCPClient(t)
+	c, ctx, cancel, tempFilePath := setupMCPClient(t)
 	defer c.Close()
 	defer cancel()
+	defer os.Remove(tempFilePath)
 
 	// Call the update_card tool
 	updateCardRequest := mcp.CallToolRequest{}
@@ -269,9 +310,10 @@ func TestUpdateCard(t *testing.T) {
 
 func TestDeleteCard(t *testing.T) {
 	// Setup client
-	c, ctx, cancel := setupMCPClient(t)
+	c, ctx, cancel, tempFilePath := setupMCPClient(t)
 	defer c.Close()
 	defer cancel()
+	defer os.Remove(tempFilePath)
 
 	// Call the delete_card tool
 	deleteCardRequest := mcp.CallToolRequest{}
@@ -317,9 +359,10 @@ func TestDeleteCard(t *testing.T) {
 
 func TestListCards(t *testing.T) {
 	// Setup client
-	c, ctx, cancel := setupMCPClient(t)
+	c, ctx, cancel, tempFilePath := setupMCPClient(t)
 	defer c.Close()
 	defer cancel()
+	defer os.Remove(tempFilePath)
 
 	// Test 1: List all cards without filtering
 	t.Run("ListAllCards", func(t *testing.T) {

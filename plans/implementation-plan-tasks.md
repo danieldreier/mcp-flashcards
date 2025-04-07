@@ -463,17 +463,33 @@ Update the create_card test to:
 - Clean up the temporary file after testing
 
 ### Success Criteria
-- [ ] MCP server initializes the storage system correctly
-- [ ] `create_card` tool uses the storage system to create and persist cards
-- [ ] Integration tests verify that cards are actually created and stored
-- [ ] The file is properly saved and can be loaded again
+- [x] MCP server initializes the storage system correctly
+  - Implemented command-line flag for storage file path
+  - Added proper error handling for storage initialization
+- [x] `create_card` tool uses the storage system to create and persist cards
+  - Updated handler to call storage.CreateCard with proper parameters
+  - Added error handling for storage operations
+- [x] Integration tests verify that cards are actually created and stored
+  - Created tests that check if cards are properly persisted to file
+  - Verified card data in the storage file after creation
+- [x] The file is properly saved and can be loaded again
+  - Implemented proper file handling with atomic writes
+  - Added JSON parsing verification in tests
 
 ### Step-by-Step Implementation
-1. [ ] Update `cmd/flashcards/main.go` to initialize and use the storage system
-2. [ ] Update the `create_card` handler to use the storage system
-3. [ ] Update `cmd/flashcards/main_test.go` to test actual card creation
-4. [ ] Run the tests with `go test ./cmd/flashcards -v`
-5. [ ] Create a test dataset of cards using the tool
+1. [x] Update `cmd/flashcards/main.go` to initialize and use the storage system
+   - Added command-line flag for specifying storage file path
+   - Implemented proper storage initialization and error handling
+2. [x] Update the `create_card` handler to use the storage system
+   - Updated handler to extract parameters and call storage methods
+   - Added proper error handling for storage operations
+3. [x] Update `cmd/flashcards/main_test.go` to test actual card creation
+   - Added verification that cards are persisted to the storage file
+   - Implemented proper file cleanup after tests
+4. [x] Run the tests with `go test ./cmd/flashcards -v`
+   - All tests passed successfully with proper storage integration
+5. [x] Create a test dataset of cards using the tool
+   - Created test cards with various content and tags
 
 ## Task 5: Implement FSRS Manager
 
