@@ -182,9 +182,20 @@ func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, err
 		priority float64
 	}
 
+	// Recently reviewed cards to avoid returning the same card immediately
+	recentlyReviewed := make(map[string]bool)
+	minReviewInterval := 5 * time.Minute // Minimum time between reviews of the same card
+
+	// Get all reviews from the last X minutes to identify recently reviewed cards
+	for _, card := range cardsToConsider {
+		if !card.LastReviewedAt.IsZero() && now.Sub(card.LastReviewedAt) < minReviewInterval {
+			recentlyReviewed[card.ID] = true
+		}
+	}
+
 	for _, storageCard := range cardsToConsider { // Iterate over the filtered list
-		// Consider cards due now or in the past
-		if !storageCard.FSRS.Due.After(now) {
+		// Consider cards due now or in the past, but skip recently reviewed ones
+		if !storageCard.FSRS.Due.After(now) && !recentlyReviewed[storageCard.ID] {
 			priority := s.FSRSManager.GetReviewPriority(storageCard.FSRS.State, storageCard.FSRS.Due, now)
 			// Convert storage.Card to our main Card type here
 			card := Card{

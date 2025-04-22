@@ -1,18 +1,10 @@
-## New Features
+## Bug Fixes (0.3.1)
 
-- **Due Date Progress Tracking**: Added support for tracking progress toward test due dates, with detailed statistics including:
-  - Total cards and mastered cards for each test
-  - Progress percentage toward completion
-  - Days remaining until the test
-  - Required pace to complete remaining cards
-  - Smart filtering of past due dates
+- **Prevent Repetition of Recently Reviewed Cards**: Fixed an issue where the same card would show up immediately after submission even when scored highly. The system now ensures a minimum interval between reviews of the same card.
 
-- **Due-Date-Progress Resource**: New MCP resource that provides real-time progress information for upcoming tests, helping users monitor their study progress and prioritize their time.
-
-- **Backward Compatibility**: Added support for seamlessly upgrading older storage files to the new format with due dates while preserving all existing data.
+## New Features (0.3.0)
 
 - **Tag Filtering for Due Cards**: Users can now filter cards by tags when retrieving due cards, allowing focused study on specific subjects
-
 - **Available Tags Resource**: Added a new MCP resource that provides information about all available tags, including:
   - Card counts for each tag
   - Number of due cards per tag
