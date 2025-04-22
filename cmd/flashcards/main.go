@@ -59,6 +59,20 @@ When using this server, always follow this precise educational workflow:
    - Focus on fundamental knowledge common to multiple missed questions
 
 Always maintain an excited, encouraging tone throughout the entire session using plenty of emojis!
+
+MANAGING DUE DATES:
+- You can manage test due dates using the 'manage_due_dates' tool.
+- To create: Specify action='create', topic='Your Topic Name', date='YYYY-MM-DD'. A tag will be generated.
+- To update: Specify action='update', due_date_id='...', and optionally new topic, date, or tag.
+- To delete: Specify action='delete', due_date_id='...'.
+- To list: Specify action='list'.
+- Use the 'due-date-progress' resource to see current due dates, tags, and progress.
+
+STUDYING FOR A TEST:
+- Ask the user which test they want to study for (e.g., "Study for the biology test").
+- Use the 'due-date-progress' resource to find the 'tag' associated with that test topic.
+- Call 'get_due_card' with the specific 'tag' to focus the session.
+- After each 'submit_review', check the 'due-date-progress' resource again (or calculate based on the list result and the review) and inform the user of their updated progress towards the goal (e.g., "Great! You've now mastered X out of Y cards for the biology test (Z% complete). Let's keep going! 💪").
 `
 
 func main() {
@@ -234,6 +248,51 @@ func main() {
 		),
 	)
 
+	// Define the help_analyze_learning tool
+	helpAnalyzeLearningTool := mcp.NewTool(
+		"help_analyze_learning",
+		mcp.WithDescription(
+			"Analyze the student's learning progress and suggest improvements. "+
+				"IMPORTANT EDUCATIONAL GUIDANCE: "+
+				"1. Review the student's performance across all cards 📊 "+
+				"2. Identify patterns in what concepts are challenging 🧩 "+
+				"3. Suggest new cards that would help with prerequisite knowledge 💡 "+
+				"4. Look for fundamental concepts that apply across multiple difficult cards 🔍 "+
+				"5. Explain your analysis enthusiastically and supportively 🚀 "+
+				"6. Use many emojis and exciting middle-school appropriate language 🤩 "+
+				"7. Get the student excited about mastering these concepts! 💪 "+
+				"8. Frame challenges as opportunities for growth, not as failures ✨ "+
+				"9. Suggest specific strategies tailored to their learning patterns 🎯",
+		),
+		// No parameters defined for this tool initially
+	)
+
+	// Define the manage_due_dates tool
+	manageDueDatesTool := mcp.NewTool("manage_due_dates",
+		mcp.WithDescription(
+			"Manage test/topic due dates. Action can be 'create', 'update', 'delete', or 'list'. "+
+				"Requires different parameters based on the action. "+
+				"Dates must be in YYYY-MM-DD format. "+
+				"Tags are automatically generated on create (e.g., 'test-biology-20240715') but can be overridden on update.",
+		),
+		mcp.WithString("action",
+			mcp.Required(),
+			mcp.Description("The action to perform: 'create', 'update', 'delete', 'list'"),
+		),
+		mcp.WithString("topic",
+			mcp.Description("The name of the test or topic (e.g., 'Biology Test'). Required for 'create'."),
+		),
+		mcp.WithString("date",
+			mcp.Description("The due date in YYYY-MM-DD format. Required for 'create'."),
+		),
+		mcp.WithString("due_date_id",
+			mcp.Description("The ID of the due date entry. Required for 'update' and 'delete'."),
+		),
+		mcp.WithString("tag",
+			mcp.Description("The specific tag to associate cards with this due date. Optional for 'update'."),
+		),
+	)
+
 	// Register all tools with their handlers
 	s.AddTool(getDueCardTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Pass the context with service to the handler
@@ -254,30 +313,13 @@ func main() {
 	s.AddTool(listCardsTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return handleListCards(ctx, request)
 	})
-
-	// Define the help_analyze_learning tool
-	helpAnalyzeLearningTool := mcp.NewTool(
-		"help_analyze_learning",
-		mcp.WithDescription(
-			"Analyze the student's learning progress and suggest improvements. "+
-				"IMPORTANT EDUCATIONAL GUIDANCE: "+
-				"1. Review the student's performance across all cards 📊 "+
-				"2. Identify patterns in what concepts are challenging 🧩 "+
-				"3. Suggest new cards that would help with prerequisite knowledge 💡 "+
-				"4. Look for fundamental concepts that apply across multiple difficult cards 🔍 "+
-				"5. Explain your analysis enthusiastically and supportively 🚀 "+
-				"6. Use many emojis and exciting middle-school appropriate language 🤩 "+
-				"7. Get the student excited about mastering these concepts! 💪 "+
-				"8. Frame challenges as opportunities for growth, not as failures ✨ "+
-				"9. Suggest specific strategies tailored to their learning patterns 🎯",
-		),
-		// No parameters defined for this tool initially
-	)
-
-	// Register the help_analyze_learning tool with the implemented handler
 	s.AddTool(helpAnalyzeLearningTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Pass the context with service to the handler
 		return handleHelpAnalyzeLearning(ctx, request)
+	})
+	s.AddTool(manageDueDatesTool, func(reqCtx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Pass the context with service to the handler (to be implemented in handlers.go)
+		return handleManageDueDates(ctx, request)
 	})
 
 	// Register a resource for available tags and card counts
@@ -288,10 +330,26 @@ func main() {
 		mcp.WithMIMEType("application/json"),
 	)
 
+	// Define a resource for due date progress
+	dueDateProgressResource := mcp.NewResource(
+		"due-date-progress",
+		"Due Date Progress Overview",
+		mcp.WithResourceDescription(
+			"Provides a summary of upcoming test due dates, associated tags, progress, and required study pace. "+
+				"Progress is based on cards last rated as Easy (4). Pace is calculated based on days remaining excluding the due date itself.",
+		),
+		mcp.WithMIMEType("application/json"),
+	)
+
 	// Add the resource with its handler
 	s.AddResource(tagsResource, func(reqCtx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
 		// Pass the context with service to the handler
 		return handleTagsResource(ctx, request)
+	})
+	// Register the new resource
+	s.AddResource(dueDateProgressResource, func(reqCtx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+		// Pass the context with service to the handler (to be implemented in handlers.go)
+		return handleDueDateProgressResource(ctx, request)
 	})
 
 	// Start the server

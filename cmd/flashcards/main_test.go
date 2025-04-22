@@ -266,27 +266,33 @@ func TestGetDueCard(t *testing.T) {
 		if !ok {
 			t.Fatalf("Expected TextContent for physics filter, got %T", result.Content[0])
 		}
-		if !strings.Contains(textContent.Text, "No cards due for review") {
-			t.Errorf("Expected 'No cards due' error for physics filter, got: %s", textContent.Text)
-		}
+		t.Logf("Physics filter response text: %s", textContent.Text) // Log raw response
+
 		// Check stats are still returned even with no matching card
 		var errorResponse struct {
 			Error string    `json:"error"`
 			Stats CardStats `json:"stats"` // Expect stats to be included in error response
 		}
 		err = json.Unmarshal([]byte(textContent.Text), &errorResponse)
-		if err == nil { //Unmarshal error is expected if stats aren't present
-			if errorResponse.Stats.TotalCards != totalCardsExpected {
-				t.Errorf("Expected %d total cards in stats (physics filter error), got %d", totalCardsExpected, errorResponse.Stats.TotalCards)
-			}
-			if errorResponse.Stats.DueCards != dueCardsExpected {
-				t.Errorf("Expected %d due cards in stats (physics filter error), got %d", dueCardsExpected, errorResponse.Stats.DueCards)
-			}
-			t.Logf("Filter 'physics': Got expected error, Stats: %d total, %d due", errorResponse.Stats.TotalCards, errorResponse.Stats.DueCards)
-		} else {
-			// If unmarshal failed, it means stats likely weren't included, which is a bug
-			t.Errorf("Failed to parse error response for physics filter, stats might be missing: %v. Response text: %s", err, textContent.Text)
+		if err != nil {
+			t.Fatalf("Failed to parse error response JSON for physics filter: %v. Response text: %s", err, textContent.Text)
 		}
+		t.Logf("Parsed physics filter error response: %+v", errorResponse) // Log parsed response
+
+		// Verify the specific error message
+		expectedErrorMsg := "No cards found with the specified tags: [physics]"
+		if !strings.Contains(errorResponse.Error, expectedErrorMsg) {
+			t.Errorf("Expected error message containing '%s', got: '%s'", expectedErrorMsg, errorResponse.Error)
+		}
+
+		// Check the stats included in the error response
+		if errorResponse.Stats.TotalCards != totalCardsExpected {
+			t.Errorf("Expected %d total cards in stats (physics filter error), got %d", totalCardsExpected, errorResponse.Stats.TotalCards)
+		}
+		if errorResponse.Stats.DueCards != dueCardsExpected {
+			t.Errorf("Expected %d due cards in stats (physics filter error), got %d", dueCardsExpected, errorResponse.Stats.DueCards)
+		}
+		t.Logf("Filter 'physics': Verified expected error and stats: Total=%d, Due=%d", errorResponse.Stats.TotalCards, errorResponse.Stats.DueCards)
 
 		// Test Case 5: No filter (should return most due overall: Card B)
 		getDueCardRequest.Params.Arguments = map[string]interface{}{}

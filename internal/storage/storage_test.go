@@ -1,11 +1,13 @@
 package storage
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/open-spaced-repetition/go-fsrs"
 )
@@ -261,8 +263,8 @@ func TestFileStorage_ListCards(t *testing.T) {
 		t.Errorf("Expected 2 cards with tag3, got %d", len(tag3Cards))
 	}
 
-	// List cards with multiple tags (tag1 OR tag3)
-	multiTagCards, err := storage.ListCards([]string{"tag1", "tag3"})
+	// List cards with multiple tags (tag1 OR tag3) - must explicitly use OR logic
+	multiTagCards, err := storage.ListCards([]string{"tag1", "tag3"}, false) // false = OR logic
 	if err != nil {
 		t.Fatalf("Error listing cards with multiple tags: %v", err)
 	}
@@ -523,5 +525,78 @@ func TestFileStorage_UUIDs(t *testing.T) {
 
 	if err4 != nil || err5 != nil {
 		t.Error("Expected valid UUID format for review IDs")
+	}
+}
+
+func TestFileStorage_Load_WithDueDates(t *testing.T) {
+	t.Parallel() // Mark test as parallelizable
+
+	// Prepare sample data with DueDates
+	testID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Second) // Truncate for easier comparison
+	expectedDueDate := DueDate{
+		ID:      testID,
+		Topic:   "Unit Test Topic",
+		DueDate: now.AddDate(0, 0, 7), // Due in 7 days
+		Tag:     "test-unit-topic",
+	}
+	storeData := FlashcardStore{
+		Cards:       make(map[string]Card),
+		Reviews:     []Review{},
+		DueDates:    []DueDate{expectedDueDate},
+		LastUpdated: now,
+	}
+
+	jsonData, err := json.MarshalIndent(storeData, "", "  ")
+	if err != nil {
+		t.Fatalf("Failed to marshal test data: %v", err)
+	}
+
+	// Create temp file and write data
+	tempDir := t.TempDir()
+	tempFilePath := filepath.Join(tempDir, "load_due_dates_test.json")
+	if err := os.WriteFile(tempFilePath, jsonData, 0644); err != nil {
+		t.Fatalf("Failed to write test data file: %v", err)
+	}
+
+	// Create FileStorage and Load
+	fs := NewFileStorage(tempFilePath)
+	err = fs.Load()
+	if err != nil {
+		t.Fatalf("fs.Load() failed: %v", err)
+	}
+
+	// --- Assertions ---
+	fs.mu.RLock() // Lock for reading internal store state
+	defer fs.mu.RUnlock()
+
+	if fs.store.DueDates == nil {
+		t.Fatalf("fs.store.DueDates is nil after Load, expected a slice")
+	}
+
+	if len(fs.store.DueDates) != 1 {
+		t.Fatalf("Expected 1 due date after Load, got %d", len(fs.store.DueDates))
+	}
+
+	loadedDueDate := fs.store.DueDates[0]
+
+	// Use cmp.Diff for detailed comparison, handling potential time zone differences
+	// Allow time comparison with a small tolerance (e.g., 1 second) if needed, though Truncate should help.
+	if diff := cmp.Diff(expectedDueDate, loadedDueDate); diff != "" {
+		t.Errorf("Loaded DueDate mismatch (-want +got):\n%s", diff)
+	}
+
+	// Explicit checks for key fields
+	if loadedDueDate.ID != expectedDueDate.ID {
+		t.Errorf("ID mismatch: want %s, got %s", expectedDueDate.ID, loadedDueDate.ID)
+	}
+	if loadedDueDate.Topic != expectedDueDate.Topic {
+		t.Errorf("Topic mismatch: want %s, got %s", expectedDueDate.Topic, loadedDueDate.Topic)
+	}
+	if !loadedDueDate.DueDate.Equal(expectedDueDate.DueDate) {
+		t.Errorf("DueDate mismatch: want %s, got %s", expectedDueDate.DueDate, loadedDueDate.DueDate)
+	}
+	if loadedDueDate.Tag != expectedDueDate.Tag {
+		t.Errorf("Tag mismatch: want %s, got %s", expectedDueDate.Tag, loadedDueDate.Tag)
 	}
 }
