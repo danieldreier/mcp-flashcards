@@ -141,8 +141,13 @@ func main() {
 	// Define the create_card tool
 	createCardTool := mcp.NewTool("create_card",
 		mcp.WithDescription(
-			"Create a new flashcard. "+
-				"IMPORTANT CREATIVE GUIDANCE: "+
+			"Propose a new flashcard to the student based on learning analysis. "+
+				"IMPORTANT CONFIRMATION WORKFLOW: "+
+				"1. Propose the card details (front, back, tags) to the user for review FIRST. 🤔 "+
+				"2. Ask the user explicitly if they approve creating this card. 👍👎 "+
+				"3. ONLY call this tool if the user confirms approval. ✅ "+
+				"4. If the user suggests changes, incorporate them and ask for approval again. 🔄 "+
+				"CREATIVE GUIDANCE (when proposing the card): "+
 				"1. Analyze what topics the student struggled with most in previous cards 📊 "+
 				"2. Identify prerequisite concepts they may be missing 🧩 "+
 				"3. Focus on fundamental knowledge that applies to multiple missed questions 🔍 "+
