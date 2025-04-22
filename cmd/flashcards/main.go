@@ -280,6 +280,20 @@ func main() {
 		return handleHelpAnalyzeLearning(ctx, request)
 	})
 
+	// Register a resource for available tags and card counts
+	tagsResource := mcp.NewResource(
+		"available-tags",
+		"Available Flashcard Tags",
+		mcp.WithResourceDescription("Shows all available tags in the flashcard system and how many cards exist for each tag."),
+		mcp.WithMIMEType("application/json"),
+	)
+
+	// Add the resource with its handler
+	s.AddResource(tagsResource, func(reqCtx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+		// Pass the context with service to the handler
+		return handleTagsResource(ctx, request)
+	})
+
 	// Start the server
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("Error serving MCP server: %v", err)

@@ -1348,3 +1348,113 @@ func TestHelpAnalyzeLearning(t *testing.T) {
 
 	t.Logf("Successfully called help_analyze_learning tool and verified response")
 }
+
+func TestTagsResource(t *testing.T) {
+	// Setup client
+	c, ctx, cancel, tempFilePath := setupMCPClient(t)
+	defer c.Close()
+	defer cancel()
+	defer os.Remove(tempFilePath)
+
+	// Create some cards with different tags
+	err := createTestCard(c, ctx, "Math Card 1", "Answer 1", []string{"math", "algebra"}, -1)
+	if err != nil {
+		t.Fatalf("Failed to create math card 1: %v", err)
+	}
+	err = createTestCard(c, ctx, "Math Card 2", "Answer 2", []string{"math", "geometry"}, -0.5)
+	if err != nil {
+		t.Fatalf("Failed to create math card 2: %v", err)
+	}
+	err = createTestCard(c, ctx, "Chemistry Card", "H2O", []string{"chemistry", "molecules"}, -2)
+	if err != nil {
+		t.Fatalf("Failed to create chemistry card: %v", err)
+	}
+	err = createTestCard(c, ctx, "Future Card", "Not due yet", []string{"math", "future"}, 1)
+	if err != nil {
+		t.Fatalf("Failed to create future card: %v", err)
+	}
+
+	// Read the tags resource
+	readResourceRequest := mcp.ReadResourceRequest{}
+	readResourceRequest.Params.URI = "available-tags"
+
+	result, err := c.ReadResource(ctx, readResourceRequest)
+	if err != nil {
+		t.Fatalf("Failed to read available-tags resource: %v", err)
+	}
+
+	// Check if the response is valid
+	if len(result.Contents) == 0 {
+		t.Fatalf("No content returned from reading available-tags resource")
+	}
+
+	// Get the text content
+	textContent, ok := result.Contents[0].(mcp.TextResourceContents)
+	if !ok {
+		t.Fatalf("Expected TextResourceContents, got %T", result.Contents[0])
+	}
+
+	if textContent.Text == "" {
+		t.Fatalf("Empty text content from resource")
+	}
+
+	// Parse the JSON response
+	var tags []struct {
+		Tag        string `json:"tag"`
+		CardCount  int    `json:"card_count"`
+		DueCount   int    `json:"due_count"`
+		TotalCards int    `json:"total_cards"`
+		DueCards   int    `json:"due_cards"`
+	}
+	err = json.Unmarshal([]byte(textContent.Text), &tags)
+	if err != nil {
+		t.Fatalf("Failed to parse tags resource JSON: %v", err)
+	}
+
+	// Verify tag data
+	expectedTags := map[string]int{
+		"math":      3, // 3 cards with tag "math"
+		"algebra":   1,
+		"geometry":  1,
+		"chemistry": 1,
+		"molecules": 1,
+		"future":    1,
+	}
+
+	// Verify all expected tags are present with correct counts
+	found := make(map[string]bool)
+	for _, tag := range tags {
+		expectedCount, exists := expectedTags[tag.Tag]
+		if !exists {
+			t.Errorf("Unexpected tag found: %s", tag.Tag)
+			continue
+		}
+		found[tag.Tag] = true
+
+		if tag.CardCount != expectedCount {
+			t.Errorf("Tag %s: expected count %d, got %d", tag.Tag, expectedCount, tag.CardCount)
+		}
+
+		// Verify math has 2 due cards (not the future one)
+		if tag.Tag == "math" && tag.DueCount != 2 {
+			t.Errorf("Tag 'math' should have 2 due cards, got %d", tag.DueCount)
+		}
+
+		// Verify consistent global stats
+		if tag.TotalCards != 4 {
+			t.Errorf("Tag %s: expected total_cards 4, got %d", tag.Tag, tag.TotalCards)
+		}
+		if tag.DueCards != 3 {
+			t.Errorf("Tag %s: expected due_cards 3, got %d", tag.Tag, tag.DueCards)
+		}
+	}
+
+	// Make sure we found all expected tags
+	for tag := range expectedTags {
+		if !found[tag] {
+			t.Errorf("Expected tag %s not found in resource", tag)
+		}
+	}
+
+	t.Logf("Successfully verified tags resource with %d tags", len(tags))
+}

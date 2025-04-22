@@ -527,3 +527,93 @@ func handleHelpAnalyzeLearning(ctx context.Context, request mcp.CallToolRequest)
 
 	return mcp.NewToolResultText(string(jsonBytes)), nil
 }
+
+// handleTagsResource generates a resource showing all available tags in the system
+// and how many cards exist for each tag. This helps users and LLMs know what tags
+// are available for filtering cards.
+func handleTagsResource(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	// Get the service from context
+	s, ok := ctx.Value("service").(*FlashcardService)
+	if !ok || s == nil {
+		return nil, fmt.Errorf("service not available")
+	}
+
+	// Get all cards from storage
+	allCards, err := s.Storage.ListCards(nil)
+	if err != nil {
+		return nil, fmt.Errorf("error listing cards: %w", err)
+	}
+
+	// Map to count cards per tag
+	tagCounts := make(map[string]int)
+	for _, card := range allCards {
+		for _, tag := range card.Tags {
+			tagCounts[tag]++
+		}
+	}
+
+	// Convert to sorted slice of tag info structs
+	type TagInfo struct {
+		Tag        string `json:"tag"`
+		CardCount  int    `json:"card_count"`
+		DueCount   int    `json:"due_count"`   // Count of cards with this tag that are due
+		TotalCards int    `json:"total_cards"` // Total number of cards in the system
+		DueCards   int    `json:"due_cards"`   // Total number of due cards in the system
+	}
+
+	// Calculate overall stats once
+	now := time.Now()
+	totalCards := len(allCards)
+	dueCards := 0
+	for _, card := range allCards {
+		if !card.FSRS.Due.After(now) {
+			dueCards++
+		}
+	}
+
+	// Calculate due counts per tag
+	tagDueCounts := make(map[string]int)
+	for _, card := range allCards {
+		if !card.FSRS.Due.After(now) {
+			for _, tag := range card.Tags {
+				tagDueCounts[tag]++
+			}
+		}
+	}
+
+	// Convert map to sorted slice
+	tags := make([]TagInfo, 0, len(tagCounts))
+	for tag, count := range tagCounts {
+		tags = append(tags, TagInfo{
+			Tag:        tag,
+			CardCount:  count,
+			DueCount:   tagDueCounts[tag],
+			TotalCards: totalCards,
+			DueCards:   dueCards,
+		})
+	}
+
+	// Sort tags alphabetically for consistent display
+	sort.Slice(tags, func(i, j int) bool {
+		return tags[i].Tag < tags[j].Tag
+	})
+
+	// Marshal to JSON for resource response
+	jsonBytes, err := json.MarshalIndent(tags, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling tags to JSON: %w", err)
+	}
+
+	// Create TextResourceContents with the JSON data
+	textContent := &mcp.TextResourceContents{
+		URI:      "available-tags",
+		MIMEType: "application/json",
+		Text:     string(jsonBytes),
+	}
+
+	// Return as ResourceContents slice (interfaces)
+	var contents []mcp.ResourceContents
+	contents = append(contents, textContent)
+
+	return contents, nil
+}
