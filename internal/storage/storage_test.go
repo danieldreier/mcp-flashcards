@@ -263,8 +263,8 @@ func TestFileStorage_ListCards(t *testing.T) {
 		t.Errorf("Expected 2 cards with tag3, got %d", len(tag3Cards))
 	}
 
-	// List cards with multiple tags (tag1 OR tag3) - must explicitly use OR logic
-	multiTagCards, err := storage.ListCards([]string{"tag1", "tag3"}, false) // false = OR logic
+	// List cards with multiple tags (tag1 OR tag3)
+	multiTagCards, err := storage.ListCards([]string{"tag1", "tag3"})
 	if err != nil {
 		t.Fatalf("Error listing cards with multiple tags: %v", err)
 	}

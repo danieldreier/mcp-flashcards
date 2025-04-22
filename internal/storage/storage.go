@@ -67,7 +67,7 @@ type Storage interface {
 	GetCard(id string) (Card, error)
 	UpdateCard(card Card) error
 	DeleteCard(id string) error
-	ListCards(tags []string, matchAllTags ...bool) ([]Card, error)
+	ListCards(tags []string) ([]Card, error)
 
 	// Review operations
 	AddReview(cardID string, rating fsrs.Rating, answer string) (Review, error)
@@ -175,9 +175,8 @@ func (fs *FileStorage) DeleteCard(id string) error {
 	return nil
 }
 
-// ListCards returns a list of all flashcards, optionally filtered by tags
-// (must contain ALL tags if matchAllTags is true, or ANY tags if matchAllTags is false)
-func (fs *FileStorage) ListCards(tags []string, matchAllTags ...bool) ([]Card, error) {
+// ListCards returns a list of all flashcards, optionally filtered by tags (must contain ANY of the tags)
+func (fs *FileStorage) ListCards(tags []string) ([]Card, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
@@ -196,24 +195,10 @@ func (fs *FileStorage) ListCards(tags []string, matchAllTags ...bool) ([]Card, e
 		return result, nil
 	}
 
-	// Determine matching logic (default to AND logic for backward compatibility)
-	useAndLogic := true
-	if len(matchAllTags) > 0 {
-		useAndLogic = matchAllTags[0]
-	}
-
-	// Filter cards based on selected logic
+	// Filter cards: card must have ANY of the specified tags (OR logic)
 	for _, card := range fs.store.Cards {
-		if useAndLogic {
-			// AND logic - card must have ALL specified tags
-			if hasAllTags(&card, tags) {
-				result = append(result, card)
-			}
-		} else {
-			// OR logic - card must have ANY of the specified tags
-			if hasAnyTag(&card, tags) {
-				result = append(result, card)
-			}
+		if hasAnyTag(&card, tags) {
+			result = append(result, card)
 		}
 	}
 
