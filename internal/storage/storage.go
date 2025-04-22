@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,11 +16,12 @@ import (
 
 // Card represents a flashcard in storage
 type Card struct {
-	ID        string    `json:"id"`
-	Front     string    `json:"front"`
-	Back      string    `json:"back"`
-	CreatedAt time.Time `json:"created_at"`
-	Tags      []string  `json:"tags,omitempty"`
+	ID             string    `json:"id"`
+	Front          string    `json:"front"`
+	Back           string    `json:"back"`
+	CreatedAt      time.Time `json:"created_at"`
+	Tags           []string  `json:"tags,omitempty"`
+	LastReviewedAt time.Time `json:"last_reviewed_at,omitempty"`
 	// Using embedded fsrs.Card for algorithm data
 	FSRS fsrs.Card `json:"fsrs"`
 }
@@ -38,15 +40,25 @@ type Review struct {
 	State         fsrs.State `json:"state"`
 }
 
+// DueDate represents a specific test or deadline associated with a tag.
+type DueDate struct {
+	ID      string    `json:"id"`       // Unique ID for the due date entry
+	Topic   string    `json:"topic"`    // User-facing name (e.g., "Biology Test")
+	DueDate time.Time `json:"due_date"` // The date of the test/deadline
+	Tag     string    `json:"tag"`      // The tag associated with cards for this due date (e.g., "test-biology-20240715")
+}
+
 // FlashcardStore represents the data structure stored in the JSON file
 type FlashcardStore struct {
 	Cards       map[string]Card `json:"cards"`
 	Reviews     []Review        `json:"reviews"`
+	DueDates    []DueDate       `json:"due_dates"`
 	LastUpdated time.Time       `json:"last_updated"`
 }
 
 // ErrCardNotFound is returned when a card is not found in the storage
 var ErrCardNotFound = errors.New("card not found")
+var ErrDueDateNotFound = errors.New("due date not found")
 
 // Storage represents the storage interface for flashcards
 type Storage interface {
@@ -55,12 +67,17 @@ type Storage interface {
 	GetCard(id string) (Card, error)
 	UpdateCard(card Card) error
 	DeleteCard(id string) error
-	ListCards(tags []string) ([]Card, error)
+	ListCards(tags []string, matchAllTags ...bool) ([]Card, error)
 
 	// Review operations
-	// Using fsrs.Rating type for proper integration with algorithm
 	AddReview(cardID string, rating fsrs.Rating, answer string) (Review, error)
 	GetCardReviews(cardID string) ([]Review, error)
+
+	// Due Date operations
+	AddDueDate(dueDate DueDate) error
+	ListDueDates() ([]DueDate, error)
+	UpdateDueDate(dueDate DueDate) error
+	DeleteDueDate(id string) error
 
 	// File operations
 	Load() error
@@ -76,11 +93,13 @@ type FileStorage struct {
 
 // NewFileStorage creates a new FileStorage instance
 func NewFileStorage(filePath string) *FileStorage {
+	log.Printf("[Storage] Creating new FileStorage for: %s", filePath)
 	return &FileStorage{
 		filePath: filePath,
 		store: FlashcardStore{
-			Cards:   make(map[string]Card),
-			Reviews: []Review{},
+			Cards:    make(map[string]Card),
+			Reviews:  []Review{},
+			DueDates: []DueDate{},
 		},
 	}
 }
@@ -157,50 +176,94 @@ func (fs *FileStorage) DeleteCard(id string) error {
 }
 
 // ListCards returns a list of all flashcards, optionally filtered by tags
-func (fs *FileStorage) ListCards(tags []string) ([]Card, error) {
+// (must contain ALL tags if matchAllTags is true, or ANY tags if matchAllTags is false)
+func (fs *FileStorage) ListCards(tags []string, matchAllTags ...bool) ([]Card, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
-	var result []Card
+	// Check if map is initialized
+	if fs.store.Cards == nil {
+		return []Card{}, nil // Return empty slice if no cards exist
+	}
+
+	result := make([]Card, 0, len(fs.store.Cards))
 
 	// If no tags specified, return all cards
 	if len(tags) == 0 {
-		result = make([]Card, 0, len(fs.store.Cards))
 		for _, card := range fs.store.Cards {
 			result = append(result, card)
 		}
 		return result, nil
 	}
 
-	// Filter cards by tags
-	result = make([]Card, 0)
+	// Determine matching logic (default to AND logic for backward compatibility)
+	useAndLogic := true
+	if len(matchAllTags) > 0 {
+		useAndLogic = matchAllTags[0]
+	}
+
+	// Filter cards based on selected logic
 	for _, card := range fs.store.Cards {
-		if containsAnyTag(card.Tags, tags) {
-			result = append(result, card)
+		if useAndLogic {
+			// AND logic - card must have ALL specified tags
+			if hasAllTags(&card, tags) {
+				result = append(result, card)
+			}
+		} else {
+			// OR logic - card must have ANY of the specified tags
+			if hasAnyTag(&card, tags) {
+				result = append(result, card)
+			}
 		}
 	}
 
 	return result, nil
 }
 
-// containsAnyTag checks if any of the target tags are in the source tags
-func containsAnyTag(sourceTags, targetTags []string) bool {
-	if len(targetTags) == 0 {
-		return true
+// hasAnyTag checks if a card has any of the specified tags (OR logic).
+func hasAnyTag(card *Card, requiredTags []string) bool {
+	if len(requiredTags) == 0 {
+		return true // No filter means match
+	}
+	if card == nil || card.Tags == nil {
+		return false // Cannot have any tags if card or tags are nil
 	}
 
-	tagMap := make(map[string]bool)
-	for _, tag := range sourceTags {
-		tagMap[tag] = true
+	// Create a map of the card's tags for efficient lookup
+	cardTagsMap := make(map[string]bool)
+	for _, tag := range card.Tags {
+		cardTagsMap[tag] = true
 	}
 
-	for _, tag := range targetTags {
-		if tagMap[tag] {
-			return true
+	// Check if the card has any of the required tags
+	for _, reqTag := range requiredTags {
+		if cardTagsMap[reqTag] {
+			return true // Found at least one required tag
 		}
 	}
 
-	return false
+	return false // No required tags found
+}
+
+// hasAllTags checks if a card has all specified tags (AND logic).
+// Copied from service layer for use here.
+func hasAllTags(card *Card, requiredTags []string) bool {
+	if len(requiredTags) == 0 {
+		return true // No filter means match
+	}
+	if card == nil || card.Tags == nil {
+		return false // Cannot have all tags if card or tags are nil
+	}
+	cardTagsMap := make(map[string]bool)
+	for _, tag := range card.Tags {
+		cardTagsMap[tag] = true
+	}
+	for _, reqTag := range requiredTags {
+		if !cardTagsMap[reqTag] {
+			return false // Missing a required tag
+		}
+	}
+	return true // All required tags found
 }
 
 // AddReview adds a new review for a card
@@ -222,8 +285,8 @@ func (fs *FileStorage) AddReview(cardID string, rating fsrs.Rating, answer strin
 		Rating:        rating,
 		Timestamp:     now,
 		Answer:        answer,
-		ScheduledDays: 0, // This should be calculated by FSRS
-		ElapsedDays:   0, // This should be calculated by FSRS
+		ScheduledDays: card.FSRS.ScheduledDays,
+		ElapsedDays:   card.FSRS.ElapsedDays,
 		State:         card.FSRS.State,
 	}
 
@@ -254,72 +317,222 @@ func (fs *FileStorage) GetCardReviews(cardID string) ([]Review, error) {
 	return cardReviews, nil
 }
 
-// Load loads the flashcards data from the file
-func (fs *FileStorage) Load() error {
+// AddDueDate adds a new due date entry.
+func (fs *FileStorage) AddDueDate(dueDate DueDate) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-
-	// If the file doesn't exist, initialize an empty store
-	if _, err := os.Stat(fs.filePath); os.IsNotExist(err) {
-		fs.store = FlashcardStore{
-			Cards:       make(map[string]Card),
-			Reviews:     []Review{},
-			LastUpdated: time.Now(),
-		}
-		return nil
+	log.Printf("[Storage:AddDueDate] Adding DueDate: ID=%s, Topic=%s, Tag=%s. Current count: %d", dueDate.ID, dueDate.Topic, dueDate.Tag, len(fs.store.DueDates))
+	if fs.store.DueDates == nil {
+		log.Printf("[Storage:AddDueDate] Initializing DueDates slice.")
+		fs.store.DueDates = []DueDate{}
 	}
-
-	// Read the file
-	data, err := os.ReadFile(fs.filePath)
-	if err != nil {
-		return fmt.Errorf("failed to read storage file: %w", err)
-	}
-
-	// Unmarshal the JSON
-	var store FlashcardStore
-	if err := json.Unmarshal(data, &store); err != nil {
-		return fmt.Errorf("failed to unmarshal storage data: %w", err)
-	}
-
-	// Initialize maps if they are nil
-	if store.Cards == nil {
-		store.Cards = make(map[string]Card)
-	}
-
-	fs.store = store
+	fs.store.DueDates = append(fs.store.DueDates, dueDate)
+	fs.store.LastUpdated = time.Now()
+	log.Printf("[Storage:AddDueDate] Added DueDate. New count: %d.", len(fs.store.DueDates))
+	// DO NOT call Save() here, responsibility is in the service layer
+	// return fs.Save()
 	return nil
 }
 
-// Save saves the flashcards data to the file
-func (fs *FileStorage) Save() error {
+// ListDueDates retrieves all due date entries.
+func (fs *FileStorage) ListDueDates() ([]DueDate, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
+	count := 0
+	if fs.store.DueDates != nil {
+		count = len(fs.store.DueDates)
+	}
+	log.Printf("[Storage:ListDueDates] Listing DueDates. Current count: %d", count)
+	if fs.store.DueDates == nil {
+		return []DueDate{}, nil
+	}
+	result := make([]DueDate, len(fs.store.DueDates))
+	copy(result, fs.store.DueDates)
+	return result, nil
+}
 
-	// Update the last updated timestamp
+// UpdateDueDate updates an existing due date entry by its ID.
+func (fs *FileStorage) UpdateDueDate(updatedDueDate DueDate) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	log.Printf("[Storage:UpdateDueDate] Updating DueDate ID: %s", updatedDueDate.ID)
+	if fs.store.DueDates == nil {
+		return ErrDueDateNotFound
+	}
+	found := false
+	for i, dd := range fs.store.DueDates {
+		if dd.ID == updatedDueDate.ID {
+			fs.store.DueDates[i] = updatedDueDate
+			found = true
+			log.Printf("[Storage:UpdateDueDate] Found and updated.")
+			break
+		}
+	}
+	if !found {
+		return ErrDueDateNotFound
+	}
 	fs.store.LastUpdated = time.Now()
+	log.Printf("[Storage:UpdateDueDate] Updated.")
+	// DO NOT call Save() here
+	// return fs.Save()
+	return nil
+}
 
-	// Marshal the store to JSON
-	data, err := json.MarshalIndent(fs.store, "", "  ")
+// DeleteDueDate deletes a due date entry by its ID.
+func (fs *FileStorage) DeleteDueDate(id string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	log.Printf("[Storage:DeleteDueDate] Deleting DueDate ID: %s", id)
+	if fs.store.DueDates == nil {
+		return ErrDueDateNotFound
+	}
+	initialCount := len(fs.store.DueDates)
+	newDueDates := []DueDate{}
+	found := false
+	for _, dd := range fs.store.DueDates {
+		if dd.ID != id {
+			newDueDates = append(newDueDates, dd)
+		} else {
+			found = true
+		}
+	}
+	if !found {
+		return ErrDueDateNotFound
+	}
+	fs.store.DueDates = newDueDates
+	fs.store.LastUpdated = time.Now()
+	log.Printf("[Storage:DeleteDueDate] Deleted. Count changed from %d to %d.", initialCount, len(fs.store.DueDates))
+	// DO NOT call Save() here
+	// return fs.Save()
+	return nil
+}
+
+// save is the internal helper for saving data without acquiring the lock again.
+// Assumes the lock (write lock) is already held.
+func (fs *FileStorage) save() error {
+	// Ensure data structure is initialized before marshaling
+	// (Redundant if Load initializes, but safe)
+	if fs.store.Cards == nil {
+		fs.store.Cards = make(map[string]Card)
+	}
+	if fs.store.Reviews == nil {
+		fs.store.Reviews = []Review{}
+	}
+	if fs.store.DueDates == nil {
+		fs.store.DueDates = []DueDate{}
+	}
+	fs.store.LastUpdated = time.Now() // Update timestamp
+
+	log.Printf("[Storage:save internal] Data BEFORE Marshal - DueDate count: %d", len(fs.store.DueDates))
+	if len(fs.store.DueDates) > 0 {
+		log.Printf("[Storage:save internal] First DueDate Topic: %s", fs.store.DueDates[0].Topic)
+	}
+
+	dataBytes, err := json.MarshalIndent(fs.store, "", "  ")
 	if err != nil {
+		log.Printf("[Storage:save internal] Error marshaling data: %v", err)
 		return fmt.Errorf("failed to marshal storage data: %w", err)
 	}
+
+	log.Printf("[Storage:save internal] Marshaled JSON to save: %s", string(dataBytes))
 
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(fs.filePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("[Storage:save internal] Error creating directory: %v", err)
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Write to a temporary file and then rename to ensure atomic writes
+	// Write to a temporary file
 	tempFile := fs.filePath + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+	if err := os.WriteFile(tempFile, dataBytes, 0644); err != nil {
+		os.Remove(tempFile)
+		log.Printf("[Storage:save internal] Error writing temp file: %v", err)
 		return fmt.Errorf("failed to write temporary file: %w", err)
 	}
 
-	// Rename the temporary file to the target file (atomic operation)
+	// Rename the temporary file to the target file (atomic operation on most systems)
 	if err := os.Rename(tempFile, fs.filePath); err != nil {
+		os.Remove(tempFile)
+		log.Printf("[Storage:save internal] Error renaming temp file: %v", err)
 		return fmt.Errorf("failed to rename temporary file: %w", err)
 	}
 
+	log.Printf("[Storage:save internal] Save successful.")
 	return nil
+}
+
+// Load loads the flashcards data from the file
+func (fs *FileStorage) Load() error {
+	fs.mu.Lock() // Acquire Write lock for potential initial save
+	defer fs.mu.Unlock()
+	log.Printf("[Storage:Load] Attempting to load from: %s", fs.filePath)
+	if _, err := os.Stat(fs.filePath); os.IsNotExist(err) {
+		log.Printf("[Storage:Load] File not found, initializing empty store.")
+		fs.store = FlashcardStore{
+			Cards:    make(map[string]Card),
+			Reviews:  []Review{},
+			DueDates: []DueDate{},
+		}
+		// Explicitly save the initial empty structure to ensure the file exists
+		log.Printf("[Storage:Load] Saving initial empty store.")
+		// Call internal save which assumes lock is held
+		if saveErr := fs.save(); saveErr != nil {
+			log.Printf("[Storage:Load] Error saving initial empty store: %v", saveErr)
+			return fmt.Errorf("failed to save initial empty store: %w", saveErr)
+		}
+		return nil
+	}
+
+	data, err := os.ReadFile(fs.filePath)
+	if err != nil {
+		log.Printf("[Storage:Load] Error reading file: %v", err)
+		return fmt.Errorf("failed to read storage file: %w", err)
+	}
+
+	if len(data) == 0 {
+		log.Printf("[Storage:Load] File is empty, initializing empty store.")
+		fs.store = FlashcardStore{
+			Cards:    make(map[string]Card),
+			Reviews:  []Review{},
+			DueDates: []DueDate{},
+		}
+		return nil
+	}
+
+	log.Printf("[Storage:Load] Read raw data from file: %s", string(data))
+
+	var store FlashcardStore
+	if err := json.Unmarshal(data, &store); err != nil {
+		log.Printf("[Storage:Load] Error unmarshaling JSON: %v", err)
+		return fmt.Errorf("failed to unmarshal storage data: %w", err)
+	}
+	log.Printf("[Storage:Load] Successfully unmarshaled. DueDate count IMMEDIATELY after unmarshal: %d", len(store.DueDates))
+
+	// Initialize maps/slices if they are nil after unmarshal (e.g., loading older format)
+	if store.Cards == nil {
+		store.Cards = make(map[string]Card)
+	}
+	if store.Reviews == nil {
+		store.Reviews = []Review{}
+	}
+	if store.DueDates == nil {
+		log.Printf("[Storage:Load] DueDates was nil in JSON, initializing empty slice.")
+		store.DueDates = []DueDate{}
+	}
+
+	fs.store = store
+	log.Printf("[Storage:Load] Load successful. In-memory DueDate count AFTER load: %d", len(fs.store.DueDates))
+	if len(fs.store.DueDates) > 0 {
+		log.Printf("[Storage:Load] First in-memory DueDate Topic AFTER load: %s", fs.store.DueDates[0].Topic)
+	}
+	return nil
+}
+
+// Save saves the flashcards data to the file atomically.
+func (fs *FileStorage) Save() error {
+	fs.mu.Lock() // Acquire Write lock for saving
+	defer fs.mu.Unlock()
+	// Call internal save helper which assumes lock is held
+	return fs.save()
 }

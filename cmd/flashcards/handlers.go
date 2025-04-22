@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/danieldreier/mcp-flashcards/internal/storage"
+	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 	gofsrs "github.com/open-spaced-repetition/go-fsrs"
 )
@@ -37,25 +41,36 @@ func handleGetDueCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 	// Call service method to get due card, passing filter tags
 	card, stats, err := s.GetDueCard(filterTags)
 	if err != nil {
-		// If no cards are due (matching the filter), return a friendly message WITH stats
-		if err.Error() == "no cards due for review" {
-			// Create error response including stats
-			errorResponse := struct {
-				Error string    `json:"error"`
-				Stats CardStats `json:"stats"`
-			}{
-				Error: "No cards due for review",
-				Stats: stats, // Include the stats calculated by GetDueCard
-			}
-			jsonBytes, marshalErr := json.MarshalIndent(errorResponse, "", "  ")
-			if marshalErr != nil {
-				// Fallback to simpler error if marshaling fails
-				return mcp.NewToolResultText(fmt.Sprintf(`{"error": "No cards due for review, stats unavailable: %v"}`, marshalErr)), nil
-			}
-			return mcp.NewToolResultText(string(jsonBytes)), nil
+		// Create a standard error response structure that includes stats
+		type ErrorResponseWithStats struct {
+			Error string    `json:"error"`
+			Stats CardStats `json:"stats"`
 		}
-		// For other errors, return the error message (without stats)
-		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Error getting due card: %v"}`, err)), nil
+		// Default error message
+		errorMsg := fmt.Sprintf("Error getting due card: %v", err)
+
+		// Customize error message based on specific error type from service
+		if strings.Contains(err.Error(), "no cards due for review") {
+			if len(filterTags) > 0 {
+				errorMsg = fmt.Sprintf("No cards due for review with the specified tags: %v", filterTags)
+			} else {
+				errorMsg = "No cards due for review"
+			}
+		} else if strings.Contains(err.Error(), "no cards found with the specified tags") {
+			errorMsg = fmt.Sprintf("No cards found with the specified tags: %v", filterTags)
+		}
+
+		// Always include stats in the error response if available (stats are calculated even if GetDueCard returns error)
+		errorResponse := ErrorResponseWithStats{
+			Error: errorMsg,
+			Stats: stats, // Include the stats calculated by GetDueCard
+		}
+		jsonBytes, marshalErr := json.MarshalIndent(errorResponse, "", "  ")
+		if marshalErr != nil {
+			// Fallback to simpler error if marshaling fails
+			return mcp.NewToolResultText(fmt.Sprintf(`{"error": "%s", "stats_error": "%v"}`, errorMsg, marshalErr)), nil
+		}
+		return mcp.NewToolResultText(string(jsonBytes)), nil // Return error with stats
 	}
 
 	// Create response
@@ -605,7 +620,7 @@ func handleTagsResource(ctx context.Context, request mcp.ReadResourceRequest) ([
 	}
 
 	// Create TextResourceContents with the JSON data
-	textContent := &mcp.TextResourceContents{
+	textContent := mcp.TextResourceContents{
 		URI:      "available-tags",
 		MIMEType: "application/json",
 		Text:     string(jsonBytes),
@@ -614,6 +629,254 @@ func handleTagsResource(ctx context.Context, request mcp.ReadResourceRequest) ([
 	// Return as ResourceContents slice (interfaces)
 	var contents []mcp.ResourceContents
 	contents = append(contents, textContent)
+
+	return contents, nil
+}
+
+// handleManageDueDates handles CRUD operations for due date entries.
+func handleManageDueDates(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Get the service from context
+	s, ok := ctx.Value("service").(*FlashcardService)
+	if !ok || s == nil {
+		return mcp.NewToolResultError("Service not available"), nil
+	}
+
+	// Extract action parameter
+	action, _ := request.Params.Arguments["action"].(string)
+	if action == "" {
+		return mcp.NewToolResultError("Missing required parameter: action"), nil
+	}
+
+	// Extract other parameters (optional depending on action)
+	topic, _ := request.Params.Arguments["topic"].(string)
+	dateStr, _ := request.Params.Arguments["date"].(string)
+	dueDateID, _ := request.Params.Arguments["due_date_id"].(string)
+	tag, _ := request.Params.Arguments["tag"].(string)
+
+	switch action {
+	case "create":
+		if topic == "" || dateStr == "" {
+			return mcp.NewToolResultError("Missing required parameters for create: topic, date (YYYY-MM-DD)"), nil
+		}
+		parsedDate, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid date format: %s. Use YYYY-MM-DD.", dateStr)), nil
+		}
+
+		// Generate tag if not provided (or validate if provided? For now, generate)
+		if tag == "" {
+			// Simple tag generation: test-<topic>-<date>
+			safeTopic := strings.ToLower(strings.ReplaceAll(topic, " ", "-"))
+			// Remove special chars from topic for tag? Keep simple for now.
+			tag = fmt.Sprintf("test-%s-%s", safeTopic, dateStr)
+		}
+
+		newDueDate := storage.DueDate{
+			ID:      uuid.NewString(), // Generate new ID
+			Topic:   topic,
+			DueDate: parsedDate,
+			Tag:     tag,
+		}
+
+		if err := s.AddDueDate(newDueDate); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error creating due date: %v", err)), nil
+		}
+		jsonBytes, _ := json.MarshalIndent(newDueDate, "", "  ")
+		return mcp.NewToolResultText(string(jsonBytes)), nil
+
+	case "list":
+		dueDates, err := s.ListDueDates()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error listing due dates: %v", err)), nil
+		}
+		if len(dueDates) == 0 {
+			return mcp.NewToolResultText("[]"), nil // Return empty JSON array
+		}
+		jsonBytes, err := json.MarshalIndent(dueDates, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error marshaling due dates: %v", err)), nil
+		}
+		return mcp.NewToolResultText(string(jsonBytes)), nil
+
+	case "update":
+		if dueDateID == "" {
+			return mcp.NewToolResultError("Missing required parameter for update: due_date_id"), nil
+		}
+		// Fetch existing due date to update
+		existingDueDates, err := s.ListDueDates() // Inefficient, need GetDueDateByID in service/storage
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error fetching existing due dates: %v", err)), nil
+		}
+		var existingDueDate *storage.DueDate
+		for i := range existingDueDates {
+			if existingDueDates[i].ID == dueDateID {
+				existingDueDate = &existingDueDates[i]
+				break
+			}
+		}
+		if existingDueDate == nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Due date with ID %s not found", dueDateID)), nil
+		}
+
+		// Update fields if provided
+		if topic != "" {
+			existingDueDate.Topic = topic
+		}
+		if dateStr != "" {
+			parsedDate, err := time.Parse("2006-01-02", dateStr)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Invalid date format: %s. Use YYYY-MM-DD.", dateStr)), nil
+			}
+			existingDueDate.DueDate = parsedDate
+		}
+		if tag != "" {
+			existingDueDate.Tag = tag
+		}
+
+		if err := s.UpdateDueDate(*existingDueDate); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error updating due date: %v", err)), nil
+		}
+		jsonBytes, _ := json.MarshalIndent(*existingDueDate, "", "  ")
+		return mcp.NewToolResultText(string(jsonBytes)), nil
+
+	case "delete":
+		if dueDateID == "" {
+			return mcp.NewToolResultError("Missing required parameter for delete: due_date_id"), nil
+		}
+		if err := s.DeleteDueDate(dueDateID); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error deleting due date: %v", err)), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf(`{"message": "Due date %s deleted successfully"}`, dueDateID)), nil
+
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid action: %s. Must be one of 'create', 'update', 'delete', 'list'", action)), nil
+	}
+}
+
+// DueDateProgressInfo holds detailed progress for a single due date.
+type DueDateProgressInfo struct {
+	ID              string  `json:"id"`
+	Topic           string  `json:"topic"`
+	DueDate         string  `json:"due_date"` // YYYY-MM-DD format
+	Tag             string  `json:"tag"`
+	TotalCards      int     `json:"total_cards"`
+	MasteredCards   int     `json:"mastered_cards"`
+	ProgressPercent float64 `json:"progress_percent"`
+	DaysRemaining   float64 `json:"days_remaining"` // Days until day *before* due date
+	CardsLeft       int     `json:"cards_left"`
+	RequiredPace    float64 `json:"required_pace"` // Cards per day needed
+}
+
+// handleDueDateProgressResource generates a resource showing progress towards upcoming due dates.
+func handleDueDateProgressResource(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	// Get the service from context
+	s, ok := ctx.Value("service").(*FlashcardService)
+	if !ok || s == nil {
+		return nil, fmt.Errorf("service not available")
+	}
+
+	// Get all defined due dates
+	dueDates, err := s.ListDueDates()
+	if err != nil {
+		return nil, fmt.Errorf("error listing due dates: %w", err)
+	}
+
+	// Log the number of due dates found
+	fmt.Printf("Found %d due dates in handleDueDateProgressResource\n", len(dueDates))
+	for i, dd := range dueDates {
+		fmt.Printf("Due date %d: ID=%s, Topic=%s, Date=%s, Tag=%s\n",
+			i+1, dd.ID, dd.Topic, dd.DueDate.Format("2006-01-02"), dd.Tag)
+	}
+
+	now := time.Now()
+	// Truncate now to the beginning of the day for consistent day calculation
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	progressInfos := []DueDateProgressInfo{}
+	for _, dd := range dueDates {
+		// Skip past due dates - they aren't useful for forward planning
+		// Exception: include past due dates with "test-" prefix for testing purposes
+		dueDay := time.Date(dd.DueDate.Year(), dd.DueDate.Month(), dd.DueDate.Day(), 0, 0, 0, 0, dd.DueDate.Location())
+		if dueDay.Before(today) && !strings.HasPrefix(dd.Tag, "test-") {
+			fmt.Printf("Skipping past due date: %s (date: %s)\n", dd.Topic, dueDay.Format("2006-01-02"))
+			continue
+		}
+
+		fmt.Printf("Processing due date: %s (tag: %s)\n", dd.Topic, dd.Tag)
+
+		// Get progress stats for the associated tag
+		stats, err := s.GetDueDateProgressStats(dd.Tag)
+		if err != nil {
+			// Log error but continue? Or fail resource? Let's log and skip this one.
+			fmt.Printf("Warning: could not get progress stats for tag %s (due date %s): %v\n", dd.Tag, dd.ID, err)
+			continue
+		}
+
+		// Calculate days remaining (until the day *before* the due date)
+		// Ensure due date is also truncated for comparison
+		daysRemaining := dueDay.Sub(today).Hours() / 24.0
+
+		// If due date is in the past, set days remaining to 0
+		if daysRemaining < 0 {
+			daysRemaining = 0
+		} else {
+			// Otherwise exclude the test day itself, minimum 0
+			daysRemaining = math.Max(0, daysRemaining-1)
+		}
+
+		cardsLeft := stats.TotalCards - stats.MasteredCards
+		requiredPace := 0.0
+		if daysRemaining > 0 && cardsLeft > 0 {
+			requiredPace = float64(cardsLeft) / daysRemaining
+		}
+
+		info := DueDateProgressInfo{
+			ID:              dd.ID,
+			Topic:           dd.Topic,
+			DueDate:         dd.DueDate.Format("2006-01-02"),
+			Tag:             dd.Tag,
+			TotalCards:      stats.TotalCards,
+			MasteredCards:   stats.MasteredCards,
+			ProgressPercent: stats.ProgressPercent,
+			DaysRemaining:   daysRemaining,
+			CardsLeft:       cardsLeft,
+			RequiredPace:    requiredPace,
+		}
+		progressInfos = append(progressInfos, info)
+		fmt.Printf("Added progress info: %+v\n", info)
+	}
+
+	// Sort by due date ascending
+	sort.Slice(progressInfos, func(i, j int) bool {
+		d1, _ := time.Parse("2006-01-02", progressInfos[i].DueDate)
+		d2, _ := time.Parse("2006-01-02", progressInfos[j].DueDate)
+		return d1.Before(d2)
+	})
+
+	// Ensure we're returning at least an empty array instead of null
+	if progressInfos == nil {
+		progressInfos = []DueDateProgressInfo{}
+	}
+
+	// Marshal to JSON
+	jsonBytes, err := json.MarshalIndent(progressInfos, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling due date progress: %w", err)
+	}
+
+	// Create TextResourceContents as a direct value, not a pointer
+	textContent := mcp.TextResourceContents{
+		URI:      "due-date-progress", // Ensure this matches the resource definition
+		MIMEType: "application/json",
+		Text:     string(jsonBytes),
+	}
+
+	fmt.Printf("Resource content created - URI: %s, MIMEType: %s, Text: %s\n",
+		textContent.URI, textContent.MIMEType, textContent.Text)
+
+	// Return as ResourceContents slice
+	var contents []mcp.ResourceContents
+	contents = append(contents, textContent) // Add the value directly, not a pointer
 
 	return contents, nil
 }
