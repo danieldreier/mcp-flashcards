@@ -1457,4 +1457,81 @@ func TestTagsResource(t *testing.T) {
 	}
 
 	t.Logf("Successfully verified tags resource with %d tags", len(tags))
+
+	// Test that the resource is updated when new cards with new tags are added
+	t.Run("ResourceUpdatesWithNewTags", func(t *testing.T) {
+		// Record initial tag count
+		initialTagCount := len(tags)
+
+		// Create a card with a brand new tag that doesn't exist yet
+		uniqueTag := "unique_physics_tag"
+		err = createTestCard(c, ctx, "Physics Card", "E=mc²", []string{uniqueTag}, -0.25)
+		if err != nil {
+			t.Fatalf("Failed to create physics card: %v", err)
+		}
+
+		// Read the tags resource again
+		result, err = c.ReadResource(ctx, readResourceRequest)
+		if err != nil {
+			t.Fatalf("Failed to read available-tags resource after adding new card: %v", err)
+		}
+
+		// Parse the updated tags
+		textContent, ok = result.Contents[0].(mcp.TextResourceContents)
+		if !ok {
+			t.Fatalf("Expected TextResourceContents after update, got %T", result.Contents[0])
+		}
+
+		var updatedTags []struct {
+			Tag        string `json:"tag"`
+			CardCount  int    `json:"card_count"`
+			DueCount   int    `json:"due_count"`
+			TotalCards int    `json:"total_cards"`
+			DueCards   int    `json:"due_cards"`
+		}
+		err = json.Unmarshal([]byte(textContent.Text), &updatedTags)
+		if err != nil {
+			t.Fatalf("Failed to parse updated tags resource JSON: %v", err)
+		}
+
+		// Verify there's one more tag now
+		if len(updatedTags) != initialTagCount+1 {
+			t.Errorf("Expected %d tags after adding new card, got %d", initialTagCount+1, len(updatedTags))
+		}
+
+		// Verify the new tag exists and has the right counts
+		found := false
+		for _, tag := range updatedTags {
+			if tag.Tag == uniqueTag {
+				found = true
+
+				// Verify the tag has exactly 1 card
+				if tag.CardCount != 1 {
+					t.Errorf("New tag should have exactly 1 card, got %d", tag.CardCount)
+				}
+
+				// Verify the card is due (due count should be 1)
+				if tag.DueCount != 1 {
+					t.Errorf("New tag should have 1 due card, got %d", tag.DueCount)
+				}
+
+				// Verify global stats updated correctly
+				if tag.TotalCards != 5 { // 4 original + 1 new
+					t.Errorf("Expected total_cards to be 5 after adding card, got %d", tag.TotalCards)
+				}
+
+				if tag.DueCards != 4 { // 3 original due + 1 new due
+					t.Errorf("Expected due_cards to be 4 after adding card, got %d", tag.DueCards)
+				}
+
+				break
+			}
+		}
+
+		if !found {
+			t.Errorf("New tag '%s' not found in updated resource", uniqueTag)
+		}
+
+		t.Logf("Successfully verified resource updates when new card with new tag is added")
+	})
 }
