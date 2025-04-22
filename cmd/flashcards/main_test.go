@@ -150,6 +150,165 @@ func TestGetDueCard(t *testing.T) {
 	// Print the response for debugging
 	t.Logf("Successfully got card: %s - %s", response.Card.Front, response.Card.Back)
 	t.Logf("Stats: %d total cards, %d due cards", response.Stats.TotalCards, response.Stats.DueCards)
+
+	// Test Tag Filtering
+	t.Run("TestGetDueCardWithTagFilter", func(t *testing.T) {
+		// Create more cards with specific tags and due times for filtering test
+		// Card A: Math, due 1 hour ago
+		err = createTestCard(c, ctx, "Math Card A", "Answer A", []string{"math", "easy"}, -1)
+		if err != nil {
+			t.Fatalf("Failed to create math card A: %v", err)
+		}
+		// Card B: Chemistry, due 2 hours ago (should be most due overall)
+		err = createTestCard(c, ctx, "Chem Card B", "Answer B", []string{"chemistry", "medium"}, -2)
+		if err != nil {
+			t.Fatalf("Failed to create chem card B: %v", err)
+		}
+		// Card C: Math, due 30 mins ago
+		err = createTestCard(c, ctx, "Math Card C", "Answer C", []string{"math", "hard"}, -0.5)
+		if err != nil {
+			t.Fatalf("Failed to create math card C: %v", err)
+		}
+		// Card D: Chemistry, due 10 mins ago
+		err = createTestCard(c, ctx, "Chem Card D", "Answer D", []string{"chemistry", "hard"}, -0.16)
+		if err != nil {
+			t.Fatalf("Failed to create chem card D: %v", err)
+		}
+		// Card E: Math & Easy tag, due 5 mins ago
+		err = createTestCard(c, ctx, "Math Easy Card E", "Answer E", []string{"math", "easy"}, -0.08)
+		if err != nil {
+			t.Fatalf("Failed to create math easy card E: %v", err)
+		}
+
+		// Total cards = 3 (from outer test) + 5 (from this subtest) = 8
+		totalCardsExpected := 8
+		// Due cards = 2 (from outer test, excluding Card 3) + 5 (from this subtest) = 7
+		dueCardsExpected := 7
+
+		// Test Case 1: Filter by "chemistry"
+		getDueCardRequest.Params.Arguments = map[string]interface{}{
+			"tags": []interface{}{"chemistry"},
+		}
+		result, err = c.CallTool(ctx, getDueCardRequest)
+		if err != nil {
+			t.Fatalf("Failed to call get_due_card with chemistry filter: %v", err)
+		}
+		err = json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &response)
+		if err != nil {
+			t.Fatalf("Failed to parse chemistry filter response JSON: %v", err)
+		}
+		if !strings.Contains(response.Card.Front, "Chem Card B") {
+			t.Errorf("Expected most due chemistry card (Card B), got: %s", response.Card.Front)
+		}
+		if response.Stats.TotalCards != totalCardsExpected {
+			t.Errorf("Expected %d total cards in stats, got %d", totalCardsExpected, response.Stats.TotalCards)
+		}
+		if response.Stats.DueCards != dueCardsExpected {
+			t.Errorf("Expected %d due cards in stats, got %d", dueCardsExpected, response.Stats.DueCards)
+		}
+		t.Logf("Filter 'chemistry': Got '%s', Stats: %d total, %d due", response.Card.Front, response.Stats.TotalCards, response.Stats.DueCards)
+
+		// Test Case 2: Filter by "math"
+		getDueCardRequest.Params.Arguments = map[string]interface{}{
+			"tags": []interface{}{"math"},
+		}
+		result, err = c.CallTool(ctx, getDueCardRequest)
+		if err != nil {
+			t.Fatalf("Failed to call get_due_card with math filter: %v", err)
+		}
+		err = json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &response)
+		if err != nil {
+			t.Fatalf("Failed to parse math filter response JSON: %v", err)
+		}
+		if !strings.Contains(response.Card.Front, "Math Card A") { // Card A is due longer ago than C or E
+			t.Errorf("Expected most due math card (Card A), got: %s", response.Card.Front)
+		}
+		if response.Stats.TotalCards != totalCardsExpected {
+			t.Errorf("Expected %d total cards in stats, got %d", totalCardsExpected, response.Stats.TotalCards)
+		}
+		if response.Stats.DueCards != dueCardsExpected {
+			t.Errorf("Expected %d due cards in stats, got %d", dueCardsExpected, response.Stats.DueCards)
+		}
+		t.Logf("Filter 'math': Got '%s', Stats: %d total, %d due", response.Card.Front, response.Stats.TotalCards, response.Stats.DueCards)
+
+		// Test Case 3: Filter by "math" and "easy"
+		getDueCardRequest.Params.Arguments = map[string]interface{}{
+			"tags": []interface{}{"math", "easy"},
+		}
+		result, err = c.CallTool(ctx, getDueCardRequest)
+		if err != nil {
+			t.Fatalf("Failed to call get_due_card with math & easy filter: %v", err)
+		}
+		err = json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &response)
+		if err != nil {
+			t.Fatalf("Failed to parse math & easy filter response JSON: %v", err)
+		}
+		if !strings.Contains(response.Card.Front, "Math Card A") { // Card A is due longer ago than E
+			t.Errorf("Expected most due math & easy card (Card A), got: %s", response.Card.Front)
+		}
+		if response.Stats.TotalCards != totalCardsExpected {
+			t.Errorf("Expected %d total cards in stats, got %d", totalCardsExpected, response.Stats.TotalCards)
+		}
+		if response.Stats.DueCards != dueCardsExpected {
+			t.Errorf("Expected %d due cards in stats, got %d", dueCardsExpected, response.Stats.DueCards)
+		}
+		t.Logf("Filter 'math', 'easy': Got '%s', Stats: %d total, %d due", response.Card.Front, response.Stats.TotalCards, response.Stats.DueCards)
+
+		// Test Case 4: Filter by non-existent tag "physics"
+		getDueCardRequest.Params.Arguments = map[string]interface{}{
+			"tags": []interface{}{"physics"},
+		}
+		result, err = c.CallTool(ctx, getDueCardRequest)
+		if err != nil {
+			t.Fatalf("Failed to call get_due_card with physics filter: %v", err)
+		}
+		textContent, ok := result.Content[0].(mcp.TextContent)
+		if !ok {
+			t.Fatalf("Expected TextContent for physics filter, got %T", result.Content[0])
+		}
+		if !strings.Contains(textContent.Text, "No cards due for review") {
+			t.Errorf("Expected 'No cards due' error for physics filter, got: %s", textContent.Text)
+		}
+		// Check stats are still returned even with no matching card
+		var errorResponse struct {
+			Error string    `json:"error"`
+			Stats CardStats `json:"stats"` // Expect stats to be included in error response
+		}
+		err = json.Unmarshal([]byte(textContent.Text), &errorResponse)
+		if err == nil { //Unmarshal error is expected if stats aren't present
+			if errorResponse.Stats.TotalCards != totalCardsExpected {
+				t.Errorf("Expected %d total cards in stats (physics filter error), got %d", totalCardsExpected, errorResponse.Stats.TotalCards)
+			}
+			if errorResponse.Stats.DueCards != dueCardsExpected {
+				t.Errorf("Expected %d due cards in stats (physics filter error), got %d", dueCardsExpected, errorResponse.Stats.DueCards)
+			}
+			t.Logf("Filter 'physics': Got expected error, Stats: %d total, %d due", errorResponse.Stats.TotalCards, errorResponse.Stats.DueCards)
+		} else {
+			// If unmarshal failed, it means stats likely weren't included, which is a bug
+			t.Errorf("Failed to parse error response for physics filter, stats might be missing: %v. Response text: %s", err, textContent.Text)
+		}
+
+		// Test Case 5: No filter (should return most due overall: Card B)
+		getDueCardRequest.Params.Arguments = map[string]interface{}{}
+		result, err = c.CallTool(ctx, getDueCardRequest)
+		if err != nil {
+			t.Fatalf("Failed to call get_due_card with no filter: %v", err)
+		}
+		err = json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &response)
+		if err != nil {
+			t.Fatalf("Failed to parse no filter response JSON: %v", err)
+		}
+		if !strings.Contains(response.Card.Front, "Chem Card B") { // Card B due 2 hours ago
+			t.Errorf("Expected most due overall card (Card B), got: %s", response.Card.Front)
+		}
+		if response.Stats.TotalCards != totalCardsExpected {
+			t.Errorf("Expected %d total cards in stats (no filter), got %d", totalCardsExpected, response.Stats.TotalCards)
+		}
+		if response.Stats.DueCards != dueCardsExpected {
+			t.Errorf("Expected %d due cards in stats (no filter), got %d", dueCardsExpected, response.Stats.DueCards)
+		}
+		t.Logf("Filter 'none': Got '%s', Stats: %d total, %d due", response.Card.Front, response.Stats.TotalCards, response.Stats.DueCards)
+	})
 }
 
 // createTestCard is a helper function to create a test card with specified due time

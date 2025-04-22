@@ -93,6 +93,7 @@ func main() {
 	getDueCardTool := mcp.NewTool("get_due_card",
 		mcp.WithDescription(
 			"Get the next flashcard due for review with statistics. "+
+				"Can optionally filter by tags to focus the study session. "+
 				"IMPORTANT EDUCATIONAL WORKFLOW: "+
 				"1. Show ONLY the front (question) side of the card to the student 📝 "+
 				"2. DO NOT reveal the back (answer) side at this stage ⚠️ "+
@@ -102,7 +103,10 @@ func main() {
 				"6. NEVER show both sides of the card simultaneously at this phase ❌ "+
 				"This follows proven spaced repetition methodology for effective learning.",
 		),
-		// No parameters required for now
+		// Add optional tags parameter
+		mcp.WithArray("tags",
+			mcp.Description("Optional list of tags to filter due cards by. Card must have ALL specified tags."),
+		),
 	)
 
 	// Define the submit_review tool

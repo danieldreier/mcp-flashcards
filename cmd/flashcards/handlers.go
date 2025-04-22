@@ -24,14 +24,37 @@ func handleGetDueCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 		return mcp.NewToolResultText("Error: Service not available"), nil
 	}
 
-	// Call service method to get due card
-	card, stats, err := s.GetDueCard()
-	if err != nil {
-		// If no cards are due, return a friendly message
-		if err.Error() == "no cards due for review" {
-			return mcp.NewToolResultText(`{"error": "No cards due for review"}`), nil
+	// Extract optional parameters
+	var filterTags []string
+	if tagsInterface, ok := request.Params.Arguments["tags"].([]interface{}); ok {
+		for _, tag := range tagsInterface {
+			if tagStr, ok := tag.(string); ok {
+				filterTags = append(filterTags, tagStr)
+			}
 		}
-		// For other errors, return the error message
+	}
+
+	// Call service method to get due card, passing filter tags
+	card, stats, err := s.GetDueCard(filterTags)
+	if err != nil {
+		// If no cards are due (matching the filter), return a friendly message WITH stats
+		if err.Error() == "no cards due for review" {
+			// Create error response including stats
+			errorResponse := struct {
+				Error string    `json:"error"`
+				Stats CardStats `json:"stats"`
+			}{
+				Error: "No cards due for review",
+				Stats: stats, // Include the stats calculated by GetDueCard
+			}
+			jsonBytes, marshalErr := json.MarshalIndent(errorResponse, "", "  ")
+			if marshalErr != nil {
+				// Fallback to simpler error if marshaling fails
+				return mcp.NewToolResultText(fmt.Sprintf(`{"error": "No cards due for review, stats unavailable: %v"}`, marshalErr)), nil
+			}
+			return mcp.NewToolResultText(string(jsonBytes)), nil
+		}
+		// For other errors, return the error message (without stats)
 		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Error getting due card: %v"}`, err)), nil
 	}
 

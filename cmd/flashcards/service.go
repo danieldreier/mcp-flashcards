@@ -143,24 +143,52 @@ func (s *FlashcardService) ListCards(filterTags []string, includeStats bool) ([]
 	return cards, stats, nil
 }
 
-// GetDueCard returns the next card due for review with statistics
-func (s *FlashcardService) GetDueCard() (Card, CardStats, error) {
-	// Get all cards from storage
-	cards, err := s.Storage.ListCards(nil)
+// GetDueCard returns the next card due for review with statistics, optionally filtered by tags
+func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, error) {
+	// Get all cards from storage first to calculate overall statistics
+	allCards, err := s.Storage.ListCards(nil)
 	if err != nil {
-		return Card{}, CardStats{}, fmt.Errorf("error listing cards: %w", err)
+		return Card{}, CardStats{}, fmt.Errorf("error listing all cards: %w", err)
+	}
+
+	// Calculate overall statistics based on all cards
+	stats := s.calculateStats(allCards)
+
+	// Filter cards based on tags if filterTags are provided
+	cardsToConsider := allCards
+	if len(filterTags) > 0 {
+		cardsToConsider = []storage.Card{}
+		for _, card := range allCards {
+			hasAllTags := true
+			for _, requiredTag := range filterTags {
+				tagFound := false
+				for _, cardTag := range card.Tags {
+					if cardTag == requiredTag {
+						tagFound = true
+						break
+					}
+				}
+				if !tagFound {
+					hasAllTags = false
+					break
+				}
+			}
+			if hasAllTags {
+				cardsToConsider = append(cardsToConsider, card)
+			}
+		}
 	}
 
 	// Current time for priority calculation
 	now := time.Now()
 
-	// Find due cards and calculate priority
+	// Find due cards from the (potentially filtered) list and calculate priority
 	var dueCards []struct {
 		card     Card
 		priority float64
 	}
 
-	for _, storageCard := range cards {
+	for _, storageCard := range cardsToConsider { // Iterate over the filtered list
 		// Convert storage.Card to our Card type
 		card := Card{
 			ID:        storageCard.ID,
@@ -181,19 +209,18 @@ func (s *FlashcardService) GetDueCard() (Card, CardStats, error) {
 		}
 	}
 
-	// Sort by priority (highest first)
+	// Sort the due cards (from the filtered list) by priority (highest first)
 	sort.Slice(dueCards, func(i, j int) bool {
 		return dueCards[i].priority > dueCards[j].priority
 	})
 
-	// Return highest priority card or error if none due
+	// Return highest priority card from the filtered set or error if none due
 	if len(dueCards) == 0 {
-		return Card{}, CardStats{}, fmt.Errorf("no cards due for review")
+		// Return the overall stats even if no card matches the filter
+		return Card{}, stats, fmt.Errorf("no cards due for review")
 	}
 
-	// Calculate statistics
-	stats := s.calculateStats(cards)
-
+	// Return the highest priority card from the filtered due list, along with overall stats
 	return dueCards[0].card, stats, nil
 }
 
