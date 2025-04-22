@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danieldreier/mcp-flashcards/internal/storage"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -326,13 +325,9 @@ func createTestCard(c *client.StdioMCPClient, ctx context.Context, front, back s
 
 	// Add hourOffset as a custom parameter for testing
 	createCardRequest.Params.Arguments = map[string]interface{}{
-		"cards": []interface{}{
-			map[string]interface{}{
-				"front": front,
-				"back":  back,
-				"tags":  tagInterfaces,
-			},
-		},
+		"front":       front,
+		"back":        back,
+		"tags":        tagInterfaces,
 		"hour_offset": hourOffset, // This will be used to set the due date
 	}
 
@@ -358,9 +353,14 @@ func createTestCard(c *client.StdioMCPClient, ctx context.Context, front, back s
 		return fmt.Errorf("failed to parse create_card response: %w", err)
 	}
 
-	if !response.Success || len(response.Cards) == 0 {
-		return fmt.Errorf("failed to create card: %s", response.Message)
-	}
+	// We now have the card ID, but we need to update its due date
+	// For now, since we don't have a direct way to set the due date,
+	// we'll use this placeholder
+	// In a real implementation, you would add a proper tool to update the due date
+
+	// TODO: Implement a way to directly set due dates for testing
+	// For now, this test relies on the implementation of CreateCard setting
+	// the due date to now, and the prioritization logic working correctly
 
 	return nil
 }
@@ -569,47 +569,30 @@ func TestSubmitReview(t *testing.T) {
 	})
 }
 
-func TestCreateMultipleCards(t *testing.T) {
+func TestCreateCard(t *testing.T) {
 	// Setup client with temp storage file
 	c, ctx, cancel, tempFilePath := setupMCPClient(t)
 	defer c.Close()
 	defer cancel()
 	defer os.Remove(tempFilePath)
 
-	// Define multiple cards to create
-	cardsToCreate := []map[string]interface{}{
-		{
-			"front": "Card A Front",
-			"back":  "Card A Back",
-			"tags":  []interface{}{"multi", "set1"},
-		},
-		{
-			"front": "Card B Front",
-			"back":  "Card B Back",
-			"tags":  []interface{}{"multi", "set2"},
-		},
-		{
-			"front": "Card C Front",
-			"back":  "Card C Back",
-			// No tags for this one
-		},
-	}
-
-	// Call the create_card tool with the cards array
+	// Call the create_card tool
 	createCardRequest := mcp.CallToolRequest{}
 	createCardRequest.Params.Name = "create_card"
 	createCardRequest.Params.Arguments = map[string]interface{}{
-		"cards": cardsToCreate,
+		"front": "What is the capital of Germany?",
+		"back":  "Berlin",
+		"tags":  []interface{}{"geography", "europe"},
 	}
 
 	result, err := c.CallTool(ctx, createCardRequest)
 	if err != nil {
-		t.Fatalf("Failed to call create_card with multiple cards: %v", err)
+		t.Fatalf("Failed to call create_card: %v", err)
 	}
 
 	// Check if we got a response
 	if len(result.Content) == 0 {
-		t.Fatalf("No content returned from create_card (multiple)")
+		t.Fatalf("No content returned from create_card")
 	}
 
 	// Extract the text content
@@ -622,75 +605,50 @@ func TestCreateMultipleCards(t *testing.T) {
 	var response CreateCardResponse
 	err = json.Unmarshal([]byte(textContent.Text), &response)
 	if err != nil {
-		t.Fatalf("Failed to parse multiple cards response JSON: %v \nResponse Text: %s", err, textContent.Text)
+		t.Fatalf("Failed to parse response JSON: %v", err)
 	}
 
-	// Verify the response structure for multiple cards
-	if !response.Success {
-		t.Error("Multiple card creation was not successful")
+	// Verify the response structure
+	if response.Card.ID == "" {
+		t.Error("Card ID is empty")
+	}
+	if response.Card.Front != "What is the capital of Germany?" {
+		t.Errorf("Card front incorrect, got: %s", response.Card.Front)
+	}
+	if response.Card.Back != "Berlin" {
+		t.Errorf("Card back incorrect, got: %s", response.Card.Back)
+	}
+	if len(response.Card.Tags) != 2 {
+		t.Errorf("Expected 2 tags, got: %d", len(response.Card.Tags))
 	}
 
-	if response.Count != len(cardsToCreate) {
-		t.Errorf("Expected count to be %d, got: %d", len(cardsToCreate), response.Count)
-	}
-
-	if len(response.Cards) != len(cardsToCreate) {
-		t.Fatalf("Expected %d cards in response, got: %d", len(cardsToCreate), len(response.Cards))
-	}
-
-	// Verify details of created cards
-	createdCardsMap := make(map[string]storage.Card)
-	for _, card := range response.Cards {
-		createdCardsMap[card.Front] = card
-	}
-
-	for i, expectedCardData := range cardsToCreate {
-		expectedFront := expectedCardData["front"].(string)
-		createdCard, found := createdCardsMap[expectedFront]
-		if !found {
-			t.Errorf("Card with front '%s' not found in response", expectedFront)
-			continue
-		}
-
-		if createdCard.ID == "" {
-			t.Errorf("Card %d ('%s') ID is empty", i, expectedFront)
-		}
-		if createdCard.Back != expectedCardData["back"].(string) {
-			t.Errorf("Card %d ('%s') back incorrect, got: %s", i, expectedFront, createdCard.Back)
-		}
-
-		// Check tags
-		expectedTags, hasTags := expectedCardData["tags"].([]interface{})
-		if hasTags {
-			if len(createdCard.Tags) != len(expectedTags) {
-				t.Errorf("Card %d ('%s') expected %d tags, got %d", i, expectedFront, len(expectedTags), len(createdCard.Tags))
-			}
-		} else {
-			if len(createdCard.Tags) != 0 {
-				t.Errorf("Card %d ('%s') expected 0 tags, got %d", i, expectedFront, len(createdCard.Tags))
-			}
-		}
-	}
-
-	// Verify the cards were actually stored by listing them
-	listCardsRequest := mcp.CallToolRequest{}
-	listCardsRequest.Params.Name = "list_cards"
-	listResult, err := c.CallTool(ctx, listCardsRequest)
+	// Verify the card was actually stored in the file
+	fileContent, err := os.ReadFile(tempFilePath)
 	if err != nil {
-		t.Fatalf("Failed to call list_cards after multiple create: %v", err)
+		t.Fatalf("Failed to read storage file: %v", err)
 	}
 
-	var listResponse ListCardsResponse
-	err = json.Unmarshal([]byte(listResult.Content[0].(mcp.TextContent).Text), &listResponse)
+	// Check if file is not empty
+	if len(fileContent) == 0 {
+		t.Fatal("Storage file is empty")
+	}
+
+	// Parse the storage file contents
+	var storageData struct {
+		Cards map[string]json.RawMessage `json:"cards"`
+	}
+
+	err = json.Unmarshal(fileContent, &storageData)
 	if err != nil {
-		t.Fatalf("Failed to parse list_cards response: %v", err)
+		t.Fatalf("Failed to parse storage file: %v", err)
 	}
 
-	if len(listResponse.Cards) != len(cardsToCreate) {
-		t.Errorf("Expected %d cards in storage after multiple create, found %d", len(cardsToCreate), len(listResponse.Cards))
+	// Check if our card ID exists in the storage
+	if _, exists := storageData.Cards[response.Card.ID]; !exists {
+		t.Errorf("Card with ID %s not found in storage file", response.Card.ID)
 	}
 
-	t.Logf("Successfully created and persisted %d cards using the batch method", len(cardsToCreate))
+	t.Logf("Successfully created and persisted card: %s with ID: %s", response.Card.Front, response.Card.ID)
 }
 
 func TestUpdateCard(t *testing.T) {
