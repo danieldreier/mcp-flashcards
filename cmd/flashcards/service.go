@@ -487,7 +487,7 @@ type DueDateProgressStats struct {
 func (s *FlashcardService) GetDueDateProgressStats(tag string) (DueDateProgressStats, error) {
 	stats := DueDateProgressStats{}
 
-	fmt.Printf("GetDueDateProgressStats called for tag: %s\n", tag)
+	// fmt.Printf("GetDueDateProgressStats called for tag: %s\n", tag)
 
 	cards, err := s.GetCardsByTag(tag) // Uses the corrected GetCardsByTag
 	if err != nil {
@@ -495,32 +495,32 @@ func (s *FlashcardService) GetDueDateProgressStats(tag string) (DueDateProgressS
 	}
 
 	stats.TotalCards = len(cards)
-	fmt.Printf("Found %d cards with tag %s\n", stats.TotalCards, tag)
+	// fmt.Printf("Found %d cards with tag %s\n", stats.TotalCards, tag)
 
 	if stats.TotalCards == 0 {
 		return stats, nil // No cards for this tag, progress is 0
 	}
 
 	masteredCount := 0
-	for i, card := range cards {
-		fmt.Printf("Checking card %d: %s\n", i+1, card.ID)
+	for _, card := range cards {
+		// fmt.Printf("Checking card %d: %s\n", i+1, card.ID)
 		reviews, err := s.Storage.GetCardReviews(card.ID)
 		if err != nil {
 			// Log or handle error? For now, skip card if reviews can't be fetched.
-			fmt.Printf("Warning: could not get reviews for card %s: %v\n", card.ID, err)
+			// fmt.Printf("Warning: could not get reviews for card %s: %v\n", card.ID, err)
 			continue
 		}
-		fmt.Printf("Card %s has %d reviews\n", card.ID, len(reviews))
+		// fmt.Printf("Card %s has %d reviews\n", card.ID, len(reviews))
 		if len(reviews) > 0 {
 			// Sort reviews by timestamp descending to get the latest
 			sort.Slice(reviews, func(i, j int) bool {
 				return reviews[i].Timestamp.After(reviews[j].Timestamp)
 			})
 			lastReview := reviews[0]
-			fmt.Printf("Card %s last review rating: %d\n", card.ID, lastReview.Rating)
+			// fmt.Printf("Card %s last review rating: %d\n", card.ID, lastReview.Rating)
 			if lastReview.Rating == gofsrs.Easy { // Check if last rating was Easy (4)
 				masteredCount++
-				fmt.Printf("Card %s counted as mastered\n", card.ID)
+				// fmt.Printf("Card %s counted as mastered\n", card.ID)
 			}
 		}
 	}
@@ -528,7 +528,7 @@ func (s *FlashcardService) GetDueDateProgressStats(tag string) (DueDateProgressS
 	stats.MasteredCards = masteredCount
 	stats.ProgressPercent = (float64(masteredCount) / float64(stats.TotalCards)) * 100.0
 
-	fmt.Printf("GetDueDateProgressStats result: %+v\n", stats)
+	// fmt.Printf("GetDueDateProgressStats result: %+v\n", stats)
 
 	return stats, nil
 }
