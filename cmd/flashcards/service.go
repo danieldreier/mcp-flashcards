@@ -306,8 +306,12 @@ func (s *FlashcardService) SubmitReview(cardID string, rating gofsrs.Rating, ans
 	now := time.Now()
 
 	// Use FSRS manager to schedule the review using the go-fsrs library
-	// Pass the existing FSRS state from the storageCard.
-	updatedState, newDueDate := s.FSRSManager.ScheduleReview(storageCard.FSRS.State, rating, now)
+	// Pass the entire FSRS state from the card
+	updatedState, newDueDate := s.FSRSManager.ScheduleReview(
+		storageCard.FSRS, // Pass the entire FSRS card
+		rating,
+		now,
+	)
 
 	// Update the card with new state information
 	storageCard.FSRS.State = updatedState

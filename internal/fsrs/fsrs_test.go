@@ -37,6 +37,7 @@ func TestNewFSRSManagerWithParams(t *testing.T) {
 func TestScheduleReview(t *testing.T) {
 	manager := NewFSRSManager()
 	now := time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC)
+	lastReview := now.Add(-24 * time.Hour) // Set last review to 24 hours ago
 
 	tests := []struct {
 		name           string
@@ -98,7 +99,12 @@ func TestScheduleReview(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state, due := manager.ScheduleReview(tt.initialState, tt.rating, now)
+			// Create a test card with initial state
+			testCard := fsrs.NewCard()
+			testCard.State = tt.initialState
+			testCard.LastReview = lastReview
+
+			state, due := manager.ScheduleReview(testCard, tt.rating, now)
 
 			if state != tt.expectedState {
 				t.Errorf("Expected state %v, got %v", tt.expectedState, state)

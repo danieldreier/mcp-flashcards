@@ -17,7 +17,7 @@ type FSRSManager interface {
 	// type State int8
 	// const New State = iota // (0)
 	// const Learning, Review, Relearning State = 1, 2, 3
-	ScheduleReview(state fsrs.State, rating fsrs.Rating, now time.Time) (fsrs.State, time.Time)
+	ScheduleReview(currentCard fsrs.Card, rating fsrs.Rating, now time.Time) (fsrs.State, time.Time)
 
 	// GetReviewPriority calculates a priority score for a card (for sorting)
 	GetReviewPriority(state fsrs.State, due time.Time, now time.Time) float64
@@ -43,16 +43,10 @@ func NewFSRSManagerWithParams(params fsrs.Parameters) FSRSManager {
 }
 
 // ScheduleReview implements the FSRSManager interface
-func (f *FSRSManagerImpl) ScheduleReview(state fsrs.State, rating fsrs.Rating, now time.Time) (fsrs.State, time.Time) {
-	// Create FSRS card with current state
-	card := fsrs.NewCard() // Create a new card
-
-	// Set the card's state based on the input state
-	card.State = state
-
+func (f *FSRSManagerImpl) ScheduleReview(currentCard fsrs.Card, rating fsrs.Rating, now time.Time) (fsrs.State, time.Time) {
 	// Use the Repeat method from the go-fsrs library to calculate next schedule
 	// This properly implements the FSRS algorithm instead of manual calculations
-	schedulingInfos := f.parameters.Repeat(card, now)
+	schedulingInfos := f.parameters.Repeat(currentCard, now)
 
 	// Get the scheduling info for the provided rating
 	schedulingInfo := schedulingInfos[rating]
