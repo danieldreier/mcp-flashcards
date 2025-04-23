@@ -1,48 +1,18 @@
 package propertytest
 
-import (
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"testing"
-	"time"
-)
+// "github.com/leanovate/gopter/testutil" // Removed
 
-// TestMain is the main entry point for the property tests.
-// It ensures the binary is built once before running any tests.
-func TestMain(m *testing.M) {
-	// Get current directory
-	wd, err := os.Getwd()
-	if err != nil {
-		panic(fmt.Errorf("failed to get working directory: %w", err))
-	}
-	fmt.Printf("Current directory: %s\n", wd)
+// Map and mutex are now defined in commands.go
+// var commandCounts = make(map[string]int)
+// var commandCountMutex sync.Mutex
 
-	// Get parent directory if we're in propertytest
-	parentDir := wd
-	if filepath.Base(wd) == "propertytest" {
-		parentDir = filepath.Dir(wd)
-	}
-	fmt.Printf("Parent directory: %s\n", parentDir)
+// recordCommandExecution is now defined in commands.go
 
-	// Build the binary once for all tests
-	binPath := filepath.Join(parentDir, "flashcards")
-	fmt.Printf("Binary path: %s\n", binPath)
+// NOTE: We fixed the property test issues by implementing custom generators
+// that avoid the type conversion problems associated with chained Map() calls.
+// The approach uses custom generator functions that handle type conversions properly
+// and more carefully manage the sequence of operations to ensure the model
+// state stays in sync with the actual system under test.
 
-	buildCmd := exec.Command("go", "build", "-o", binPath)
-	buildCmd.Dir = filepath.Join(parentDir, "cmd", "flashcards")
-	fmt.Printf("Build directory: %s\n", buildCmd.Dir)
-
-	buildOutput, err := buildCmd.CombinedOutput()
-	if err != nil {
-		panic(fmt.Errorf("failed to build binary: %w\nOutput: %s", err, string(buildOutput)))
-	}
-	fmt.Printf("Successfully built binary: %s\n", binPath)
-
-	// Wait a moment for the build to complete
-	time.Sleep(100 * time.Millisecond)
-
-	// Run all tests
-	os.Exit(m.Run())
-}
+// This file might contain shared helper functions or setup logic in the future,
+// but the main test functions have been moved to separate files.

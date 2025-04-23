@@ -55,41 +55,53 @@ func (s *FlashcardService) CreateCard(front, back string, tags []string) (Card, 
 	return createdCard, nil
 }
 
-// UpdateCard updates an existing flashcard
-func (s *FlashcardService) UpdateCard(cardID string, front, back string, tags []string) (Card, error) {
+// UpdateCard updates an existing flashcard selectively based on non-nil input pointers.
+func (s *FlashcardService) UpdateCard(cardID string, front *string, back *string, tags *[]string) (Card, error) {
 	// Get the card from storage
 	storageCard, err := s.Storage.GetCard(cardID)
 	if err != nil {
-		return Card{}, fmt.Errorf("error getting card: %w", err)
+		return Card{}, fmt.Errorf("error getting card %s: %w", cardID, err)
 	}
 
-	// Update card fields (only update non-empty fields)
-	if front != "" {
-		storageCard.Front = front
+	updated := false
+	// Update fields only if the corresponding pointer is not nil
+	if front != nil {
+		if storageCard.Front != *front {
+			storageCard.Front = *front
+			updated = true
+		}
 	}
-	if back != "" {
-		storageCard.Back = back
+	if back != nil {
+		if storageCard.Back != *back {
+			storageCard.Back = *back
+			updated = true
+		}
 	}
-	// Note: We should decide if providing an empty tag list means clearing tags
-	// or doing nothing. Current storage interface updates the whole card.
-	// Let's assume [] means update to empty, nil means no change.
-	// For now, service passes tags directly if provided.
-	if tags != nil { // Allow updating to empty list by passing []string{}
-		storageCard.Tags = tags
+	if tags != nil {
+		// Need to compare slices carefully to see if an update is needed
+		if !equalStringSlices(storageCard.Tags, *tags) {
+			storageCard.Tags = *tags
+			updated = true
+		}
 	}
 
-	// Save the updated card back to storage
-	if err := s.Storage.UpdateCard(storageCard); err != nil {
-		return Card{}, fmt.Errorf("error updating card: %w", err)
-	}
+	// Only save if changes were actually made
+	if updated {
+		// Save the updated card back to storage
+		if err := s.Storage.UpdateCard(storageCard); err != nil {
+			return Card{}, fmt.Errorf("error updating card %s in storage: %w", cardID, err)
+		}
 
-	// Persist changes to disk
-	if err := s.Storage.Save(); err != nil {
-		return Card{}, fmt.Errorf("error saving storage: %w", err)
+		// Persist changes to disk
+		if err := s.Storage.Save(); err != nil {
+			// Log this error but potentially return the in-memory updated card?
+			// For consistency, let's return the error.
+			return Card{}, fmt.Errorf("error saving storage after updating card %s: %w", cardID, err)
+		}
 	}
 
 	// Convert storage.Card back to our main Card type for the response
-	updatedCard := Card{
+	responseCard := Card{
 		ID:        storageCard.ID,
 		Front:     storageCard.Front,
 		Back:      storageCard.Back,
@@ -98,7 +110,21 @@ func (s *FlashcardService) UpdateCard(cardID string, front, back string, tags []
 		FSRS:      storageCard.FSRS,
 	}
 
-	return updatedCard, nil
+	return responseCard, nil
+}
+
+// equalStringSlices checks if two string slices are equal (considers order).
+// TODO: Move to a utility package or consider sorting before comparison if order doesn't matter.
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // DeleteCard deletes a flashcard

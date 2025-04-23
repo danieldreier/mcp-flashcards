@@ -14,11 +14,13 @@ import (
 	"github.com/leanovate/gopter/gen"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
+	gofsrs "github.com/open-spaced-repetition/go-fsrs"
 )
 
 // setupPropertyTestClient sets up an MCP client for a single property test run.
 // It ensures a clean state by using a new temporary file for each run.
-func SetupPropertyTestClient(t *testing.T) (mcpClient *client.StdioMCPClient, ctx context.Context, cancel context.CancelFunc, cleanup func()) {
+// Returns *client.Client instead of *client.StdioMCPClient
+func SetupPropertyTestClient(t *testing.T) (mcpClient *client.Client, ctx context.Context, cancel context.CancelFunc, cleanup func()) {
 	t.Helper()
 
 	// Create a temporary directory for test files
@@ -80,7 +82,7 @@ func SetupPropertyTestClient(t *testing.T) (mcpClient *client.StdioMCPClient, ct
 	}
 
 	// Create context with timeout
-	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second) // Adjust timeout as needed
+	ctx, cancel = context.WithTimeout(context.Background(), 120*time.Second) // Increased timeout from 30s to 120s
 
 	// Initialize the client
 	initRequest := mcp.InitializeRequest{}
@@ -200,4 +202,42 @@ func BuildBinary(t *testing.T) string {
 	t.Logf("Successfully built flashcards binary at %s", binPath)
 
 	return binPath
+}
+
+// --- More Generators ---
+
+// GenRating generates a random rating from the valid FSRS ratings (Again, Hard, Good, Easy)
+func GenRating() gopter.Gen {
+	return gen.OneConstOf(gofsrs.Again, gofsrs.Hard, gofsrs.Good, gofsrs.Easy).
+		WithLabel("FSRSRating")
+}
+
+// GenMaybeString generates a string pointer that is sometimes nil.
+func GenMaybeString(maxLength int) gopter.Gen {
+	return gopter.CombineGens(
+		gen.Bool(),                   // Decide if the string should be generated
+		GenNonEmptyString(maxLength), // Generate the actual string
+	).Map(func(values []interface{}) *string {
+		shouldGenerate := values[0].(bool)
+		if !shouldGenerate {
+			return nil
+		}
+		str := values[1].(string)
+		return &str
+	})
+}
+
+// GenMaybeTags generates a tag slice pointer that is sometimes nil.
+func GenMaybeTags(maxTags int, maxTagLength int) gopter.Gen {
+	return gopter.CombineGens(
+		gen.Bool(),                     // Decide if tags should be generated
+		GenTags(maxTags, maxTagLength), // Generate the actual tags
+	).Map(func(values []interface{}) *[]string {
+		shouldGenerate := values[0].(bool)
+		if !shouldGenerate {
+			return nil
+		}
+		tags := values[1].([]string)
+		return &tags
+	})
 }

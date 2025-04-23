@@ -209,50 +209,85 @@ func handleCreateCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 }
 
 // handleUpdateCard handles the update_card tool request by updating an existing flashcard
-// with the provided content. Only non-empty fields are updated, allowing for partial updates.
+// with the provided content. Only provided fields are updated.
 func handleUpdateCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// Extract required parameter
+	// Extract required parameter: card_id
 	cardID, ok := request.Params.Arguments["card_id"].(string)
-	if !ok {
-		return mcp.NewToolResultText("Missing required parameter: card_id"), nil
+	if !ok || cardID == "" {
+		return mcp.NewToolResultError("Missing or empty required parameter: card_id"), nil
 	}
 
-	// Extract optional parameters
-	front, _ := request.Params.Arguments["front"].(string)
-	back, _ := request.Params.Arguments["back"].(string)
-
-	// Extract optional tags parameter
-	tags := []string{}
-	if tagsInterface, ok := request.Params.Arguments["tags"].([]interface{}); ok {
-		for _, tag := range tagsInterface {
-			if tagStr, ok := tag.(string); ok {
-				tags = append(tags, tagStr)
-			}
+	// Extract optional parameters and store them as pointers
+	var frontPtr *string
+	if frontVal, exists := request.Params.Arguments["front"]; exists {
+		if frontStr, ok := frontVal.(string); ok {
+			frontPtr = &frontStr
+		} else {
+			return mcp.NewToolResultError("Invalid type for parameter: front (must be string)"), nil
 		}
+	}
+
+	var backPtr *string
+	if backVal, exists := request.Params.Arguments["back"]; exists {
+		if backStr, ok := backVal.(string); ok {
+			backPtr = &backStr
+		} else {
+			return mcp.NewToolResultError("Invalid type for parameter: back (must be string)"), nil
+		}
+	}
+
+	var tagsPtr *[]string
+	if tagsVal, exists := request.Params.Arguments["tags"]; exists {
+		if tagsInterface, ok := tagsVal.([]interface{}); ok {
+			tags := []string{}
+			for _, tag := range tagsInterface {
+				if tagStr, ok := tag.(string); ok {
+					tags = append(tags, tagStr)
+				} else {
+					// Handle potential non-string element in tags array
+					return mcp.NewToolResultError("Invalid type for element in tags array (must be string)"), nil
+				}
+			}
+			tagsPtr = &tags // Point to the parsed slice
+		} else if tagsVal == nil { // Allow explicitly setting tags to empty with tags: null
+			emptyTags := []string{}
+			tagsPtr = &emptyTags
+		} else {
+			return mcp.NewToolResultError("Invalid type for parameter: tags (must be an array of strings or null)"), nil
+		}
+	}
+
+	// Ensure at least one field was provided for update
+	if frontPtr == nil && backPtr == nil && tagsPtr == nil {
+		return mcp.NewToolResultError("No update fields provided. Please provide at least one of 'front', 'back', or 'tags'."), nil
 	}
 
 	// Get the service from context
 	s, ok := ctx.Value("service").(*FlashcardService)
 	if !ok || s == nil {
-		return mcp.NewToolResultText("Error: Service not available"), nil
+		return mcp.NewToolResultError("Internal Server Error: Service not available"), nil
 	}
 
-	// Update the card using the service
-	updatedCard, err := s.UpdateCard(cardID, front, back, tags)
+	// Update the card using the service with pointers
+	_, err := s.UpdateCard(cardID, frontPtr, backPtr, tagsPtr)
 	if err != nil {
+		// Return error in a structured JSON format
 		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Error updating card: %v"}`, err)), nil
 	}
 
-	// Create response
+	// Create success response
 	response := UpdateCardResponse{
 		Success: true,
-		Message: fmt.Sprintf("Card %s updated successfully - Front: %s, Back: %s",
-			cardID, updatedCard.Front, updatedCard.Back),
+		Message: fmt.Sprintf("Card %s updated successfully.", cardID),
+		// Optionally include the updated card data in the response?
+		// Card: updatedCard, // If Card field exists in UpdateCardResponse
 	}
 
 	jsonBytes, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
-		return nil, err
+		// Log internal error, return generic error to client
+		fmt.Printf("Error marshaling update response: %v\n", err)
+		return mcp.NewToolResultError("Internal Server Error: Failed to create response"), nil
 	}
 
 	return mcp.NewToolResultText(string(jsonBytes)), nil

@@ -14,7 +14,7 @@ import (
 )
 
 // setupMCPClient creates and initializes a new MCP client for testing
-func setupMCPClient(t *testing.T) (*client.StdioMCPClient, context.Context, context.CancelFunc, string) {
+func setupMCPClient(t *testing.T) (*client.Client, context.Context, context.CancelFunc, string) {
 	// Create temporary storage file for testing
 	tempFile, err := os.CreateTemp("", "flashcards-test-*.json")
 	if err != nil {
@@ -318,7 +318,7 @@ func TestGetDueCard(t *testing.T) {
 }
 
 // createTestCard is a helper function to create a test card with specified due time
-func createTestCard(c *client.StdioMCPClient, ctx context.Context, front, back string, tags []string, hourOffset float64) error {
+func createTestCard(c *client.Client, ctx context.Context, front, back string, tags []string, hourOffset float64) error {
 	// Create the card
 	createCardRequest := mcp.CallToolRequest{}
 	createCardRequest.Params.Name = "create_card"

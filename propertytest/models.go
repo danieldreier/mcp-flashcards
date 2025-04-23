@@ -10,11 +10,12 @@ import (
 
 // Card represents a flashcard with content and FSRS algorithm data
 type Card struct {
-	ID        string    `json:"id"`
-	Front     string    `json:"front"`
-	Back      string    `json:"back"`
-	CreatedAt time.Time `json:"created_at"`
-	Tags      []string  `json:"tags,omitempty"`
+	ID             string    `json:"id"`
+	Front          string    `json:"front"`
+	Back           string    `json:"back"`
+	CreatedAt      time.Time `json:"created_at"`
+	LastReviewedAt time.Time `json:"last_reviewed_at,omitempty"`
+	Tags           []string  `json:"tags,omitempty"`
 	// Algorithm data - from go-fsrs package
 	FSRS gofsrs.Card `json:"fsrs"`
 }

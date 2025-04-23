@@ -28,7 +28,7 @@ func tempFilePath(t *testing.T) string {
 }
 
 // Helper to call manage_due_dates tool via MCP client
-func callManageDueDatesClient(c *client.StdioMCPClient, ctx context.Context, t *testing.T, params map[string]interface{}) (map[string]interface{}, error) {
+func callManageDueDatesClient(c *client.Client, ctx context.Context, t *testing.T, params map[string]interface{}) (map[string]interface{}, error) {
 	t.Helper()
 	req := mcp.CallToolRequest{
 		Params: struct {
@@ -76,7 +76,7 @@ func callManageDueDatesClient(c *client.StdioMCPClient, ctx context.Context, t *
 }
 
 // Helper to call create_card tool via MCP client
-func callCreateCardClient(c *client.StdioMCPClient, ctx context.Context, t *testing.T, params map[string]interface{}) (map[string]interface{}, error) {
+func callCreateCardClient(c *client.Client, ctx context.Context, t *testing.T, params map[string]interface{}) (map[string]interface{}, error) {
 	t.Helper()
 	req := mcp.CallToolRequest{
 		Params: struct {
@@ -120,7 +120,7 @@ func callCreateCardClient(c *client.StdioMCPClient, ctx context.Context, t *test
 }
 
 // Helper to call submit_review tool via MCP client
-func callSubmitReviewClient(c *client.StdioMCPClient, ctx context.Context, t *testing.T, params map[string]interface{}) (map[string]interface{}, error) {
+func callSubmitReviewClient(c *client.Client, ctx context.Context, t *testing.T, params map[string]interface{}) (map[string]interface{}, error) {
 	t.Helper()
 	req := mcp.CallToolRequest{
 		Params: struct {
@@ -184,7 +184,7 @@ func extractResultText(result *mcp.CallToolResult) (string, error) {
 }
 
 // Helper to read due_date_progress resource via MCP client
-func readDueDateProgressClient(c *client.StdioMCPClient, ctx context.Context, t *testing.T) ([]DueDateProgressInfo, error) {
+func readDueDateProgressClient(c *client.Client, ctx context.Context, t *testing.T) ([]DueDateProgressInfo, error) {
 	t.Helper()
 	req := mcp.ReadResourceRequest{
 		Params: struct {
@@ -844,4 +844,254 @@ func TestDueDateProgressClientServer(t *testing.T) {
 	if info.MasteredCards != expectedMasteredCards {
 		t.Errorf("Expected %d mastered cards, got %d", expectedMasteredCards, info.MasteredCards)
 	}
+}
+
+// --- Test Helpers ---
+
+// createInitialCards is a helper used within setupClientForDueDateTest
+func createInitialCards(c *client.Client, ctx context.Context) ([]string, error) {
+	ids := make([]string, 0, 3)
+	initialCards := []struct {
+		front string
+		back  string
+		tags  []string
+		hours float64 // Due offset
+	}{
+		{"Q1", "A1", []string{"tag1", "common"}, -2},
+		{"Q2", "A2", []string{"tag2", "common"}, -1},
+		{"Q3", "A3", []string{"tag1"}, 1},
+	}
+
+	for _, data := range initialCards {
+		err := createTestCard(c, ctx, data.front, data.back, data.tags, data.hours)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create card '%s': %w", data.front, err)
+		}
+
+		listReq := mcp.CallToolRequest{}
+		listReq.Params.Name = "list_cards"
+
+		listRes, listErr := c.CallTool(ctx, listReq) // Use different var name for CallTool error
+		if listErr != nil {
+			return nil, fmt.Errorf("failed list after create '%s': %w", data.front, listErr)
+		}
+
+		var listResponse ListCardsResponse
+		if len(listRes.Content) > 0 {
+			if textContent, ok := listRes.Content[0].(mcp.TextContent); ok {
+				if err = json.Unmarshal([]byte(textContent.Text), &listResponse); err == nil { // Assign to outer err
+					foundID := false
+					for _, card := range listResponse.Cards {
+						if card.Front == data.front {
+							ids = append(ids, card.ID)
+							foundID = true
+							break
+						}
+					}
+					if !foundID {
+						// Log or handle case where card wasn't found immediately?
+					}
+				} else {
+					// Log or handle JSON unmarshal error for list response
+					return nil, fmt.Errorf("failed to unmarshal list response for '%s': %w", data.front, err)
+				}
+			}
+		}
+	}
+	if len(ids) != len(initialCards) {
+		return nil, fmt.Errorf("could not retrieve all created card IDs, expected %d, got %d", len(initialCards), len(ids))
+	}
+	return ids, nil
+}
+
+// setupClientForDueDateTest sets up the MCP client and initial card state for due date tests.
+func setupClientForDueDateTest(t *testing.T) (c *client.Client, ctx context.Context, cancel context.CancelFunc, cleanup func(), cardIDs []string) {
+	c, ctx, cancel, tempPath := setupMCPClient(t) // Assumes setupMCPClient is defined (e.g., in main_test.go)
+	cleanup = func() {
+		cancel()
+		if c != nil {
+			c.Close()
+		}
+		os.Remove(tempPath)
+	}
+
+	ids, err := createInitialCards(c, ctx)
+	if err != nil {
+		cleanup()
+		t.Fatalf("Failed to create initial cards: %v", err)
+	}
+	cardIDs = ids
+	return c, ctx, cancel, cleanup, cardIDs
+}
+
+// getDueCardCall calls the get_due_card tool via the MCP client.
+func getDueCardCall(t *testing.T, c *client.Client, ctx context.Context) (Card, CardStats, error) {
+	t.Helper()
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "get_due_card"
+	res, err := c.CallTool(ctx, req) // Declare and assign err here
+	if err != nil {
+		return Card{}, CardStats{}, fmt.Errorf("CallTool failed: %w", err)
+	}
+	if len(res.Content) == 0 {
+		return Card{}, CardStats{}, fmt.Errorf("no content returned")
+	}
+	txt, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		return Card{}, CardStats{}, fmt.Errorf("expected TextContent, got %T", res.Content[0])
+	}
+	var cardResp CardResponse
+	// Use = to assign to existing err
+	if err = json.Unmarshal([]byte(txt.Text), &cardResp); err != nil {
+		var errResp struct {
+			Error string
+			Stats CardStats
+		}
+		if jsonErr := json.Unmarshal([]byte(txt.Text), &errResp); jsonErr == nil && errResp.Error != "" {
+			t.Logf("Original JSON parse error (ignored): %v", err)
+			return Card{}, errResp.Stats, fmt.Errorf(errResp.Error)
+		}
+		return Card{}, CardStats{}, fmt.Errorf("failed unmarshal CardResponse: %w. Text: %s", err, txt.Text)
+	}
+	return cardResp.Card, cardResp.Stats, nil
+}
+
+// submitReviewCall calls the submit_review tool via the MCP client.
+func submitReviewCall(t *testing.T, c *client.Client, ctx context.Context, cardID string, rating int) (Card, error) {
+	t.Helper()
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "submit_review"
+	req.Params.Arguments = map[string]interface{}{"card_id": cardID, "rating": float64(rating)}
+	res, err := c.CallTool(ctx, req) // Declare and assign err here
+	if err != nil {
+		return Card{}, fmt.Errorf("CallTool failed: %w", err)
+	}
+	if len(res.Content) == 0 {
+		return Card{}, fmt.Errorf("no content returned")
+	}
+	txt, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		return Card{}, fmt.Errorf("expected TextContent, got %T", res.Content[0])
+	}
+	var reviewResp ReviewResponse
+	// Use = to assign to existing err
+	if err = json.Unmarshal([]byte(txt.Text), &reviewResp); err != nil {
+		return Card{}, fmt.Errorf("failed unmarshal ReviewResponse: %w. Text: %s", err, txt.Text)
+	}
+	if !reviewResp.Success {
+		return Card{}, fmt.Errorf("review submission failed: %s", reviewResp.Message)
+	}
+	return reviewResp.Card, nil
+}
+
+// listCardsCall calls the list_cards tool via the MCP client.
+func listCardsCall(t *testing.T, c *client.Client, ctx context.Context) ([]Card, CardStats, error) {
+	t.Helper()
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "list_cards"
+	req.Params.Arguments = map[string]interface{}{"include_stats": true}
+	res, err := c.CallTool(ctx, req) // Declare and assign err here
+	if err != nil {
+		return nil, CardStats{}, fmt.Errorf("CallTool failed: %w", err)
+	}
+	if len(res.Content) == 0 {
+		return nil, CardStats{}, fmt.Errorf("no content returned")
+	}
+	txt, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		return nil, CardStats{}, fmt.Errorf("expected TextContent, got %T", res.Content[0])
+	}
+	var listResp ListCardsResponse
+	// Use = to assign to existing err
+	if err = json.Unmarshal([]byte(txt.Text), &listResp); err != nil {
+		return nil, CardStats{}, fmt.Errorf("failed unmarshal ListCardsResponse: %w. Text: %s", err, txt.Text)
+	}
+	return listResp.Cards, listResp.Stats, nil
+}
+
+// createCardDirectly interacts with storage to create a card, bypassing MCP.
+func createCardDirectly(t *testing.T, s *FlashcardService, front, back string, tags []string) storage.Card {
+	t.Helper()
+	card, err := s.Storage.CreateCard(front, back, tags)
+	if err != nil {
+		t.Fatalf("Failed to create card directly: %v", err)
+	}
+	// Manually save storage as service layer might not auto-save on direct access
+	if err := s.Storage.Save(); err != nil {
+		t.Fatalf("Failed to save storage after direct create: %v", err)
+	}
+	return card
+}
+
+// updateCardDirectly interacts with storage to update a card.
+func updateCardDirectly(t *testing.T, s *FlashcardService, card storage.Card) {
+	t.Helper()
+	if err := s.Storage.UpdateCard(card); err != nil {
+		t.Fatalf("Failed to update card directly: %v", err)
+	}
+	if err := s.Storage.Save(); err != nil {
+		t.Fatalf("Failed to save storage after direct update: %v", err)
+	}
+}
+
+// setDueDateDirectly updates a card's due date directly in storage (for testing setup).
+func setDueDateDirectly(t *testing.T, s *FlashcardService, cardID string, due time.Time) {
+	t.Helper()
+	card, err := s.Storage.GetCard(cardID)
+	if err != nil {
+		t.Fatalf("Failed to get card %s for direct due date update: %v", cardID, err)
+	}
+	card.FSRS.Due = due
+	updateCardDirectly(t, s, card) // Use helper to update and save
+}
+
+// setupClientAndService creates a service with temp storage and a client connected to it.
+func setupClientAndService(t *testing.T) (c *client.Client, s *FlashcardService, ctx context.Context, cancel context.CancelFunc, cleanup func()) {
+	t.Helper()
+	tempPath := tempFilePath(t)
+	fileStorage := storage.NewFileStorage(tempPath)
+	var err error
+	if err = fileStorage.Load(); err != nil { // Initialize empty store
+		t.Fatalf("Failed to initialize storage: %v", err)
+	}
+	s = NewFlashcardService(fileStorage)
+
+	// Use stdio client pointing to the binary with the temp file
+	// Assumes binary is built in parent dir or accessible path
+	wd, _ := os.Getwd()
+	binPath := filepath.Join(filepath.Dir(wd), "flashcards") // Adjust if needed
+
+	c, err = client.NewStdioMCPClient(
+		binPath,
+		[]string{},
+		"-file",
+		tempPath,
+	)
+	if err != nil {
+		os.Remove(tempPath)
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+
+	initRequest := mcp.InitializeRequest{}
+	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initRequest.Params.ClientInfo = mcp.Implementation{Name: "test-service-client", Version: "0.1"}
+
+	_, err = c.Initialize(ctx, initRequest)
+	if err != nil {
+		cancel()
+		c.Close()
+		os.Remove(tempPath)
+		t.Fatalf("Failed to initialize client: %v", err)
+	}
+
+	cleanup = func() {
+		cancel()
+		if c != nil {
+			c.Close()
+		}
+		os.Remove(tempPath)
+	}
+	return c, s, ctx, cancel, cleanup
 }
