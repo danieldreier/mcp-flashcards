@@ -518,12 +518,19 @@ func (c *SubmitReviewCmd) NextState(state commands.State) commands.State {
 	// --- FSRS Simulation Logic ---
 	// Retrieve FSRS parameters (use default for simulation)
 	fakeParams := gofsrs.DefaultParam()
-	fakeCard := cardModel.FSRS                     // Copy the current FSRS state
-	fakeCard.LastReview = cardModel.LastReviewedAt // Use the model's last review time
+
+	// Debug before the call
+	fmt.Printf("DEBUG NextState before Repeat: card state=%v, rating=%v\n",
+		cardModel.FSRS.State, c.Rating)
 
 	// Call the actual FSRS library's Repeat function to get the correct next state
-	schedulingInfo := fakeParams.Repeat(fakeCard, now)
+	// Use the same approach as the actual ScheduleReview function
+	schedulingInfo := fakeParams.Repeat(cardModel.FSRS, now)
 	nextFSRSInfo := schedulingInfo[c.Rating]
+
+	// Debug after the call
+	fmt.Printf("DEBUG NextState after Repeat: got next state=%v\n",
+		nextFSRSInfo.Card.State)
 
 	// Store expected values for PostCondition check
 	c.ExpectedFSRSState = nextFSRSInfo.Card.State

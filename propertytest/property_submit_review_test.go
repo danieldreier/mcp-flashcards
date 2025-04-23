@@ -46,17 +46,38 @@ func TestSubmitReviewCommand(t *testing.T) {
 	tempNow := time.Now()
 	tempNewCard := gofsrs.NewCard() // Represents a truly 'New' card state
 	tempParams := gofsrs.DefaultParam()
-	tempSchedulingInfo := tempParams.Repeat(tempNewCard, tempNow)
-	t.Logf("go-fsrs direct call (New Card, Rating=Good): Expected State=%v, Due=%v",
-		tempSchedulingInfo[gofsrs.Good].Card.State, tempSchedulingInfo[gofsrs.Good].Card.Due)
+
+	// Check all ratings
+	for _, testRating := range []gofsrs.Rating{gofsrs.Again, gofsrs.Hard, gofsrs.Good, gofsrs.Easy} {
+		tempSchedulingInfo := tempParams.Repeat(tempNewCard, tempNow)
+		t.Logf("DEBUG raw go-fsrs for rating %d: State=%v, Due=%v",
+			testRating,
+			tempSchedulingInfo[testRating].Card.State,
+			tempSchedulingInfo[testRating].Card.Due)
+	}
 	// *** End temporary log ***
 
 	// Test each rating
 	ratings := []gofsrs.Rating{gofsrs.Again, gofsrs.Hard, gofsrs.Good, gofsrs.Easy}
 	for _, rating := range ratings {
+		// Create a new card for each rating to avoid sequential effects
+		newCreateCard := &CreateCardCmd{
+			Front: fmt.Sprintf("Test Card Front for Rating %d", rating),
+			Back:  fmt.Sprintf("Test Card Back for Rating %d", rating),
+			Tags:  []string{"test"},
+		}
+		newCreateResult := newCreateCard.Run(sut)
+		newCreateResp, ok := newCreateResult.(CreateCardResponse)
+		if !ok {
+			t.Fatalf("Failed to create card for rating %d: %v", rating, newCreateResult)
+		}
+
+		testCardID := newCreateResp.Card.ID
+		t.Logf("Created test card for rating %d with ID: %s", rating, testCardID)
+
 		// Create a review command
 		submitReview := &SubmitReviewCmd{
-			CardID: cardID,
+			CardID: testCardID,
 			Rating: rating,
 			Answer: fmt.Sprintf("Test answer for rating %d", rating),
 		}
@@ -64,16 +85,16 @@ func TestSubmitReviewCommand(t *testing.T) {
 		// Create a mock state to track the expected FSRS state changes
 		mockState := &CommandState{
 			Cards: map[string]Card{
-				cardID: {
-					ID:    cardID,
-					Front: "Test Card Front",
-					Back:  "Test Card Back",
+				testCardID: {
+					ID:    testCardID,
+					Front: fmt.Sprintf("Test Card Front for Rating %d", rating),
+					Back:  fmt.Sprintf("Test Card Back for Rating %d", rating),
 					Tags:  []string{"test"},
-					FSRS:  createResp.Card.FSRS,
+					FSRS:  newCreateResp.Card.FSRS,
 				},
 			},
-			KnownRealIDs: []string{cardID},
-			LastRealID:   cardID,
+			KnownRealIDs: []string{testCardID},
+			LastRealID:   testCardID,
 			T:            t,
 		}
 
@@ -103,19 +124,15 @@ func TestSubmitReviewCommand(t *testing.T) {
 		// Check if the due date changes are reasonable
 		timeDiff := reviewResp.Card.FSRS.Due.Sub(submitReview.ExpectedDueDate).Abs()
 		t.Logf("Card FSRS State: %v, Due date: %v", reviewResp.Card.FSRS.State, reviewResp.Card.FSRS.Due)
+		t.Logf("Due date difference: %v", timeDiff)
 
 		// For rating 4 (Easy), our model prediction is way off from the real implementation
-		// so we just log the difference without failing the test
+		// so just log the difference without failing the test
 		if rating == gofsrs.Easy {
 			t.Logf("Due date for Easy rating is %s (difference from prediction: %v)",
 				reviewResp.Card.FSRS.Due.Format(time.RFC3339), timeDiff)
-		} else {
-			// For other ratings, be more strict
-			if timeDiff > 5*time.Hour {
-				t.Errorf("Due date difference too large for rating %d: %v", rating, timeDiff)
-			} else {
-				t.Logf("Due date difference for rating %d: %v", rating, timeDiff)
-			}
+		} else if timeDiff > 5*time.Hour {
+			t.Errorf("Due date difference too large for rating %d: %v", rating, timeDiff)
 		}
 
 		// For Good/Easy ratings, due date should increase significantly
