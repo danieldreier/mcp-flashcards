@@ -11,22 +11,16 @@ import (
 // TestFSRSNewCardTransitions tests FSRS state transitions specifically for new cards
 // with different ratings to verify correct state changes and due date calculations.
 func TestFSRSNewCardTransitions(t *testing.T) {
-	// Setup a client
-	mcpClient, ctx, cancel, baseCleanup := SetupPropertyTestClient(t)
+	// Setup a client using the common test function
+	mcpClient, ctx, cancel, baseCleanup := SetupTestClient(t)
 	defer func() {
 		cancel()
 		mcpClient.Close()
 		baseCleanup()
 	}()
 
-	// Create a SUT
-	sut := &FlashcardSUT{
-		Client:      mcpClient,
-		Ctx:         ctx,
-		Cancel:      cancel,
-		CleanupFunc: baseCleanup,
-		T:           t,
-	}
+	// Create a SUT using the factory function
+	sut := FlashcardSUTFactory(mcpClient, ctx, cancel, baseCleanup, t)
 
 	// Direct test of the library behavior for reference values
 	t.Run("DirectLibraryBehavior", func(t *testing.T) {

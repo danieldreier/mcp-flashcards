@@ -11,21 +11,15 @@ import (
 // that was failing in the original test.
 func TestFSRSNewCardGoodRating(t *testing.T) {
 	// Setup a client
-	mcpClient, ctx, cancel, baseCleanup := SetupPropertyTestClient(t)
+	mcpClient, ctx, cancel, baseCleanup := SetupTestClient(t)
 	defer func() {
 		cancel()
 		mcpClient.Close()
 		baseCleanup()
 	}()
 
-	// Create a SUT
-	sut := &FlashcardSUT{
-		Client:      mcpClient,
-		Ctx:         ctx,
-		Cancel:      cancel,
-		CleanupFunc: baseCleanup,
-		T:           t,
-	}
+	// Create a SUT using the factory
+	sut := FlashcardSUTFactory(mcpClient, ctx, cancel, baseCleanup, t)
 
 	// Direct library test for reference
 	t.Run("DirectLibraryReference", func(t *testing.T) {
