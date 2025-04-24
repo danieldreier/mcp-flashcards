@@ -19,6 +19,10 @@ type FSRSManager interface {
 	// const Learning, Review, Relearning State = 1, 2, 3
 	ScheduleReview(currentCard fsrs.Card, rating fsrs.Rating, now time.Time) (fsrs.State, time.Time)
 
+	// GetSchedulingInfo returns the complete card info after applying a rating
+	// This includes all FSRS metadata fields needed for accurate scheduling
+	GetSchedulingInfo(currentCard fsrs.Card, rating fsrs.Rating, now time.Time) fsrs.Card
+
 	// GetReviewPriority calculates a priority score for a card (for sorting)
 	GetReviewPriority(state fsrs.State, due time.Time, now time.Time) float64
 }
@@ -53,6 +57,18 @@ func (f *FSRSManagerImpl) ScheduleReview(currentCard fsrs.Card, rating fsrs.Rati
 
 	// Extract the updated state and due date from the scheduling information
 	return schedulingInfo.Card.State, schedulingInfo.Card.Due
+}
+
+// GetSchedulingInfo implements the FSRSManager interface
+func (f *FSRSManagerImpl) GetSchedulingInfo(currentCard fsrs.Card, rating fsrs.Rating, now time.Time) fsrs.Card {
+	// Use the Repeat method from the go-fsrs library to calculate next schedule
+	schedulingInfos := f.parameters.Repeat(currentCard, now)
+
+	// Get the scheduling info for the provided rating
+	schedulingInfo := schedulingInfos[rating]
+
+	// Return the complete updated card with all metadata fields
+	return schedulingInfo.Card
 }
 
 // GetReviewPriority calculates a priority score for a card

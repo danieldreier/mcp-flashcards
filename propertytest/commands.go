@@ -569,9 +569,11 @@ func (c *UpdateCardCmd) String() string {
 
 // --- SubmitReviewCmd ---
 type SubmitReviewCmd struct {
-	CardID string // REAL Card ID
+	CardID string
 	Rating gofsrs.Rating
-	Answer string // Optional answer text
+	Answer string
+	// Optional: Pass a specific timestamp for test simulations
+	Timestamp time.Time
 	// Store expected FSRS state for PostCondition
 	ExpectedFSRSState gofsrs.State
 	ExpectedDueDate   time.Time
@@ -581,21 +583,37 @@ func (c *SubmitReviewCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	fSUT := sut.(*FlashcardSUT)
 	fSUT.T.Logf("Run: %s", c.String())
 
-	submitReviewRequest := mcp.CallToolRequest{}
-	submitReviewRequest.Params.Name = "submit_review"
-	submitReviewRequest.Params.Arguments = map[string]interface{}{
-		"card_id": c.CardID,
-		"rating":  float64(c.Rating), // Convert Rating to float64 as expected by API
-		"answer":  c.Answer,
-	}
-
+	// Call the service through MCP
 	fSUT.T.Logf("DEBUG: Preparing to call submit_review tool with CardID=%s, Rating=%d", c.CardID, c.Rating)
 
 	// Add timer to track how long the call takes
 	startTime := time.Now()
-	fSUT.T.Logf("DEBUG: Starting MCP client call at %v", startTime.Format(time.RFC3339Nano))
+	fSUT.T.Logf("DEBUG: Starting MCP client call at %s", startTime.Format(time.RFC3339Nano))
 
-	submitResult, err := fSUT.Client.CallTool(fSUT.Ctx, submitReviewRequest)
+	// Check if we're using a custom timestamp for testing
+	var hasTimestamp bool
+	if !c.Timestamp.IsZero() {
+		hasTimestamp = true
+	}
+
+	// Build request args
+	args := map[string]interface{}{
+		"card_id": c.CardID,
+		"rating":  float64(c.Rating),
+		"answer":  c.Answer,
+	}
+
+	// Add timestamp if provided
+	if hasTimestamp {
+		args["timestamp"] = c.Timestamp.Format(time.RFC3339)
+	}
+
+	// Create and execute the request
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "submit_review"
+	req.Params.Arguments = args
+
+	submitResult, err := fSUT.Client.CallTool(fSUT.Ctx, req)
 
 	elapsed := time.Since(startTime)
 	fSUT.T.Logf("DEBUG: MCP client call completed in %v", elapsed)

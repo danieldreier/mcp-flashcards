@@ -9,6 +9,7 @@ import (
 
 	"github.com/danieldreier/mcp-flashcards/internal/fsrs"
 	"github.com/danieldreier/mcp-flashcards/internal/storage"
+	"github.com/google/uuid"
 	gofsrs "github.com/open-spaced-repetition/go-fsrs"
 )
 
@@ -366,7 +367,13 @@ func (s *FlashcardService) calculateStats(cards []storage.Card) CardStats {
 
 // SubmitReview processes a review for a card and updates its state using the FSRS algorithm
 func (s *FlashcardService) SubmitReview(cardID string, rating gofsrs.Rating, answer string) (Card, error) {
-	startTime := time.Now()
+	return s.SubmitReviewWithTime(cardID, rating, answer, timeNow())
+}
+
+// SubmitReviewWithTime processes a review for a card and updates its state using the FSRS algorithm
+// with a specific timestamp. This allows tests to provide a simulated "now" timestamp.
+func (s *FlashcardService) SubmitReviewWithTime(cardID string, rating gofsrs.Rating, answer string, now time.Time) (Card, error) {
+	startTime := now
 	fmt.Printf("[DEBUG-SVC] SubmitReview starting for cardID=%s, rating=%d at %v\n",
 		cardID, rating, startTime.Format(time.RFC3339Nano))
 
@@ -380,44 +387,81 @@ func (s *FlashcardService) SubmitReview(cardID string, rating gofsrs.Rating, ans
 	fmt.Printf("[DEBUG-SVC] Retrieved card with current state=%v, due=%v\n",
 		storageCard.FSRS.State, storageCard.FSRS.Due)
 
-	now := time.Now()
+	// Get previous reviews to calculate actual elapsed time
+	fmt.Printf("[DEBUG-SVC] Retrieving previous reviews for cardID=%s\n", cardID)
+	previousReviews, err := s.Storage.GetCardReviews(cardID)
+	if err != nil {
+		fmt.Printf("[DEBUG-SVC] Error getting reviews: %v\n", err)
+		// Don't fail the operation, just continue with default elapsed days
+	}
+	fmt.Printf("[DEBUG-SVC] Found %d previous reviews for card %s\n", len(previousReviews), cardID)
 
-	// Use FSRS manager to schedule the review using the go-fsrs library
-	fmt.Printf("[DEBUG-SVC] Calling FSRSManager.ScheduleReview\n")
-	updatedState, newDueDate := s.FSRSManager.ScheduleReview(
-		storageCard.FSRS, // Pass the entire FSRS card
+	// Calculate elapsed days since last review if we have review history
+	if len(previousReviews) > 0 {
+		// Sort reviews by timestamp (newest first)
+		sort.Slice(previousReviews, func(i, j int) bool {
+			return previousReviews[i].Timestamp.After(previousReviews[j].Timestamp)
+		})
+
+		// Get the most recent review
+		lastReviewTime := previousReviews[0].Timestamp
+
+		// Calculate elapsed days
+		elapsedDuration := now.Sub(lastReviewTime)
+		elapsedDays := uint64(elapsedDuration.Hours() / 24.0)
+
+		// Update the ElapsedDays in the card's FSRS state
+		storageCard.FSRS.ElapsedDays = elapsedDays
+
+		fmt.Printf("[DEBUG-SVC] Last review at %v, now at %v, elapsed days: %d\n",
+			lastReviewTime.Format(time.RFC3339), now.Format(time.RFC3339), elapsedDays)
+	}
+
+	fmt.Printf("[DEBUG-SVC] Calling GetSchedulingInfo with ElapsedDays=%d\n",
+		storageCard.FSRS.ElapsedDays)
+
+	// Get the complete updated FSRS card with all metadata using the new method
+	updatedFSRSCard := s.FSRSManager.GetSchedulingInfo(
+		storageCard.FSRS, // Pass the entire FSRS card with updated ElapsedDays
 		rating,
 		now,
 	)
-	fmt.Printf("[DEBUG-SVC] FSRS schedule result: newState=%v, newDueDate=%v\n",
-		updatedState, newDueDate)
+	fmt.Printf("[DEBUG-SVC] FSRS scheduling result: newState=%v, newDueDate=%v, stability=%.4f, difficulty=%.4f, reps=%d\n",
+		updatedFSRSCard.State, updatedFSRSCard.Due, updatedFSRSCard.Stability, updatedFSRSCard.Difficulty, updatedFSRSCard.Reps)
 
-	// Update the card with new state information
-	fmt.Printf("[DEBUG-SVC] Updating card FSRS state\n")
-	storageCard.FSRS.State = updatedState
-	storageCard.FSRS.Due = newDueDate // Use the returned due date
-	storageCard.LastReviewedAt = now  // Record last reviewed time (field should exist now)
+	// Update the storage card with the complete FSRS data
+	fmt.Printf("[DEBUG-SVC] Updating card with complete FSRS state\n")
+	storageCard.FSRS = updatedFSRSCard // Replace entire FSRS card with updated version
+	storageCard.LastReviewedAt = now   // Record last reviewed time (field should exist now)
 
 	// Save the updated card state back to storage
-	fmt.Printf("[DEBUG-SVC] Updating card in storage at %v\n", time.Now().Format(time.RFC3339Nano))
+	fmt.Printf("[DEBUG-SVC] Updating card in storage at %v\n", timeNow().Format(time.RFC3339Nano))
 	if err := s.Storage.UpdateCard(storageCard); err != nil {
 		fmt.Printf("[DEBUG-SVC] Error updating card: %v\n", err)
 		return Card{}, fmt.Errorf("error updating card: %w", err)
 	}
 
 	// Add review to storage
-	fmt.Printf("[DEBUG-SVC] Adding review to storage at %v\n", time.Now().Format(time.RFC3339Nano))
-	reviewLog, err := s.Storage.AddReview(cardID, rating, answer)
-	if err != nil {
+	fmt.Printf("[DEBUG-SVC] Adding review to storage at %v\n", timeNow().Format(time.RFC3339Nano))
+	reviewLog := storage.Review{
+		ID:            uuid.New().String(),
+		CardID:        cardID,
+		Rating:        rating,
+		Timestamp:     now, // Use the provided time for consistency
+		Answer:        answer,
+		ScheduledDays: updatedFSRSCard.ScheduledDays,
+		ElapsedDays:   updatedFSRSCard.ElapsedDays,
+		State:         updatedFSRSCard.State,
+	}
+
+	if err := s.Storage.AddReviewDirect(reviewLog); err != nil {
 		fmt.Printf("[DEBUG-SVC] Error adding review: %v\n", err)
-		// Attempt to rollback card update? Maybe too complex for now.
 		return Card{}, fmt.Errorf("error adding review: %w", err)
 	}
-	_ = reviewLog // Use reviewLog if needed later
 	fmt.Printf("[DEBUG-SVC] Review added successfully\n")
 
 	// Persist changes to disk
-	fmt.Printf("[DEBUG-SVC] Saving storage to disk at %v\n", time.Now().Format(time.RFC3339Nano))
+	fmt.Printf("[DEBUG-SVC] Saving storage to disk at %v\n", timeNow().Format(time.RFC3339Nano))
 	if err := s.Storage.Save(); err != nil {
 		fmt.Printf("[DEBUG-SVC] Error saving storage: %v\n", err)
 		return Card{}, fmt.Errorf("error saving storage: %w", err)
@@ -436,10 +480,13 @@ func (s *FlashcardService) SubmitReview(cardID string, rating gofsrs.Rating, ans
 
 	elapsed := time.Since(startTime)
 	fmt.Printf("[DEBUG-SVC] SubmitReview completed in %v at %v\n",
-		elapsed, time.Now().Format(time.RFC3339Nano))
+		elapsed, timeNow().Format(time.RFC3339Nano))
 
 	return updatedCard, nil
 }
+
+// Variable to allow mocking time.Now in tests
+var timeNow = time.Now
 
 // AnalyzeLearning provides insights based on review history
 func (s *FlashcardService) AnalyzeLearning() (string, error) {

@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -15,6 +16,17 @@ import (
 	gofsrs "github.com/open-spaced-repetition/go-fsrs"
 	"github.com/stretchr/testify/assert"
 )
+
+// Function to temporarily mock the time.Now function for testing
+func mockTimeNow(mockTime time.Time) func() {
+	original := timeNow
+	timeNow = func() time.Time {
+		return mockTime
+	}
+	return func() {
+		timeNow = original
+	}
+}
 
 // Helper function to create a temporary file for testing
 func tempTestFile(t *testing.T) string {
@@ -622,4 +634,86 @@ func TestDueDateProgressResourceIntegration(t *testing.T) {
 	if math.Abs(info.ProgressPercent-33.33) > 0.01 {
 		t.Errorf("Expected progress percent ~33.33%%, got %.2f%%", info.ProgressPercent)
 	}
+}
+
+// TestSubmitReviewWithElapsedDays tests that the SubmitReview method correctly calculates
+// elapsed days between reviews and passes this information to the FSRS algorithm.
+func TestSubmitReviewWithElapsedDays(t *testing.T) {
+	service, filePath := setupTestService(t)
+	defer os.Remove(filePath)
+
+	// Create a new card
+	card, err := service.CreateCard("Test Elapsed Days", "Answer", []string{"test-elapsed"})
+	assert.NoError(t, err, "CreateCard should not return an error")
+
+	// First review - Good rating
+	now := time.Now()
+	firstReview, err := service.SubmitReview(card.ID, gofsrs.Good, "First review")
+	assert.NoError(t, err, "First SubmitReview should not return an error")
+
+	// Save the due date from the first review
+	firstReviewDueDate := firstReview.FSRS.Due
+
+	// Simulate time passing - 10 days
+	elapsedDays := 10
+	simulatedTime := now.AddDate(0, 0, elapsedDays)
+
+	// Mock the time.Now function using our helper
+	restoreTime := mockTimeNow(simulatedTime)
+	defer restoreTime() // Restore original function after test
+
+	// Second review - Good rating again
+	secondReview, err := service.SubmitReview(card.ID, gofsrs.Good, "Second review")
+	assert.NoError(t, err, "Second SubmitReview should not return an error")
+
+	// The second review's due date should be calculated based on the elapsed time
+	// since the first review (10 days)
+
+	// Get the reviews for verification
+	reviews, err := service.Storage.GetCardReviews(card.ID)
+	assert.NoError(t, err, "GetCardReviews should not return an error")
+	assert.Len(t, reviews, 2, "Should have 2 reviews")
+
+	// Sort reviews by timestamp (newest first)
+	sort.Slice(reviews, func(i, j int) bool {
+		return reviews[i].Timestamp.After(reviews[j].Timestamp)
+	})
+
+	// Verify that the elapsed days value saved in the review matches what we expect
+	assert.Equal(t, uint64(elapsedDays), reviews[0].ElapsedDays,
+		"ElapsedDays in the review should match our simulated elapsed time")
+
+	// The FSRS algorithm should have used our elapsed days to calculate the new due date
+	// This will produce a different (later) due date than if we used 0 elapsed days
+	assert.True(t, secondReview.FSRS.Due.After(firstReviewDueDate.AddDate(0, 0, elapsedDays)),
+		"Second review due date should be more than (first due date + elapsed days)")
+
+	t.Logf("First review due date: %v", firstReviewDueDate)
+	t.Logf("Second review due date: %v", secondReview.FSRS.Due)
+	t.Logf("Elapsed days: %d", elapsedDays)
+
+	// Third review - using a different rating (Hard) to see another scheduling pattern
+	// Add another 5 days
+	simulatedTime = simulatedTime.AddDate(0, 0, 5)
+	restoreTime()                            // Restore time
+	restoreTime = mockTimeNow(simulatedTime) // Set new mocked time
+
+	thirdReview, err := service.SubmitReview(card.ID, gofsrs.Hard, "Third review")
+	assert.NoError(t, err, "Third SubmitReview should not return an error")
+
+	// Get the updated reviews
+	reviews, err = service.Storage.GetCardReviews(card.ID)
+	assert.NoError(t, err, "GetCardReviews should not return an error")
+	assert.Len(t, reviews, 3, "Should have 3 reviews")
+
+	// Sort reviews by timestamp (newest first)
+	sort.Slice(reviews, func(i, j int) bool {
+		return reviews[i].Timestamp.After(reviews[j].Timestamp)
+	})
+
+	// Verify the elapsed days for the third review
+	assert.Equal(t, uint64(5), reviews[0].ElapsedDays,
+		"ElapsedDays in the third review should be 5")
+
+	t.Logf("Third review due date: %v", thirdReview.FSRS.Due)
 }

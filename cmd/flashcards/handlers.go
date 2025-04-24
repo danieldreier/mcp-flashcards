@@ -119,9 +119,25 @@ func handleSubmitReview(ctx context.Context, request mcp.CallToolRequest) (*mcp.
 	}
 	fmt.Printf("[DEBUG] Review rating: %d\n", rating)
 
-	// Extract optional parameter
+	// Extract optional parameters
 	answer, _ := request.Params.Arguments["answer"].(string)
 	fmt.Printf("[DEBUG] Review answer: %s\n", answer)
+
+	// Check for optional timestamp (for testing)
+	var reviewTime time.Time
+	if timestampStr, ok := request.Params.Arguments["timestamp"].(string); ok {
+		// Try to parse the timestamp
+		parsedTime, err := time.Parse(time.RFC3339, timestampStr)
+		if err != nil {
+			fmt.Printf("[DEBUG] Invalid timestamp format: %s, err: %v\n", timestampStr, err)
+			return mcp.NewToolResultText(fmt.Sprintf("Invalid timestamp format: %v", err)), nil
+		}
+		reviewTime = parsedTime
+		fmt.Printf("[DEBUG] Using provided timestamp: %v\n", reviewTime.Format(time.RFC3339))
+	} else {
+		// Use current time if no timestamp provided
+		reviewTime = time.Now()
+	}
 
 	// Get the service from context
 	s, ok := ctx.Value("service").(*FlashcardService)
@@ -135,9 +151,9 @@ func handleSubmitReview(ctx context.Context, request mcp.CallToolRequest) (*mcp.
 	fsrsRating := gofsrs.Rating(rating)
 
 	// Call service method to submit review
-	fmt.Printf("[DEBUG] Calling service.SubmitReview() at %v\n", time.Now().Format(time.RFC3339Nano))
-	updatedCard, err := s.SubmitReview(cardID, fsrsRating, answer)
-	fmt.Printf("[DEBUG] service.SubmitReview() completed at %v\n", time.Now().Format(time.RFC3339Nano))
+	fmt.Printf("[DEBUG] Calling service.SubmitReviewWithTime() at %v\n", time.Now().Format(time.RFC3339Nano))
+	updatedCard, err := s.SubmitReviewWithTime(cardID, fsrsRating, answer, reviewTime)
+	fmt.Printf("[DEBUG] service.SubmitReviewWithTime() completed at %v\n", time.Now().Format(time.RFC3339Nano))
 
 	if err != nil {
 		fmt.Printf("[DEBUG] Error submitting review: %v\n", err)

@@ -71,6 +71,7 @@ type Storage interface {
 
 	// Review operations
 	AddReview(cardID string, rating fsrs.Rating, answer string) (Review, error)
+	AddReviewDirect(review Review) error
 	GetCardReviews(cardID string) ([]Review, error)
 
 	// Due Date operations
@@ -587,4 +588,22 @@ func (fs *FileStorage) Save() error {
 	fmt.Printf("[DEBUG-STORAGE] Save: Internal save completed in %v with err: %v\n", saveTime, err)
 
 	return err
+}
+
+// AddReviewDirect adds a new review with specified timestamp and other fields
+func (fs *FileStorage) AddReviewDirect(review Review) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// Check if the card exists
+	if _, exists := fs.store.Cards[review.CardID]; !exists {
+		return ErrCardNotFound
+	}
+
+	// Add the review with the exact information provided
+	fs.store.Reviews = append(fs.store.Reviews, review)
+	fs.store.LastUpdated = time.Now()
+
+	// Persist changes to disk immediately to prevent state leakage
+	return fs.save()
 }

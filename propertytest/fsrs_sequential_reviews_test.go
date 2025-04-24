@@ -42,11 +42,12 @@ func TestFSRSSequentialReviews(t *testing.T) {
 	libraryParams := gofsrs.DefaultParam()
 
 	for i, rating := range reviews {
-		// Run review in the service
+		// Run review in the service with the current 'now' time
 		submitReview := &SubmitReviewCmd{
-			CardID: cardID,
-			Rating: rating,
-			Answer: fmt.Sprintf("Answer for review %d (rating %d)", i+1, rating),
+			CardID:    cardID,
+			Rating:    rating,
+			Answer:    fmt.Sprintf("Answer for review %d (rating %d)", i+1, rating),
+			Timestamp: now, // Pass the current time explicitly
 		}
 		result := submitReview.Run(sut)
 		reviewResp, ok := result.(ReviewResponse)
