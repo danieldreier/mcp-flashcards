@@ -65,21 +65,54 @@ func CreateTempStateFile(t *testing.T) (tempDir string, stateFilePath string, cl
 func SetupPropertyTestClient(t *testing.T, stateFilePath string) (mcpClient *client.Client, ctx context.Context, cancel context.CancelFunc, err error) {
 	t.Helper()
 
+	// Create context with timeout
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+
+	// Use the shared implementation with our context
+	mcpClient, err = setupPropertyTestClientImpl(t, stateFilePath, ctx)
+	if err != nil {
+		cancel() // Cancel the context if setup fails
+		return nil, nil, nil, err
+	}
+
+	return mcpClient, ctx, cancel, nil // Return nil error on success
+}
+
+// SetupPropertyTestClientWithContext sets up an MCP client using a specific data file path and an external context.
+// The caller is responsible for managing the lifecycle of both the context and temp file.
+func SetupPropertyTestClientWithContext(t *testing.T, stateFilePath string, ctx context.Context) (mcpClient *client.Client, _, _ context.CancelFunc, err error) {
+	t.Helper()
+
+	// Use the shared implementation with the provided context
+	mcpClient, err = setupPropertyTestClientImpl(t, stateFilePath, ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Return empty cancel functions since we don't own the context
+	return mcpClient, nil, nil, nil
+}
+
+// setupPropertyTestClientImpl contains the shared implementation for setting up a property test client.
+// It's used by both SetupPropertyTestClient and SetupPropertyTestClientWithContext.
+func setupPropertyTestClientImpl(t *testing.T, stateFilePath string, ctx context.Context) (mcpClient *client.Client, err error) {
+	t.Helper()
+
 	// Ensure the state file exists (it should have been created by CreateTempStateFile)
 	// Declare statErr here
 	var statErr error
 	_, statErr = os.Stat(stateFilePath)
 	if os.IsNotExist(statErr) {
 		// This indicates a programming error - CreateTempStateFile should always be called first.
-		return nil, nil, nil, fmt.Errorf("SetupPropertyTestClient called with non-existent file: %s", stateFilePath)
+		return nil, fmt.Errorf("SetupPropertyTestClient called with non-existent file: %s", stateFilePath)
 	} else if statErr != nil {
-		return nil, nil, nil, fmt.Errorf("error checking state file %s: %w", stateFilePath, statErr)
+		return nil, fmt.Errorf("error checking state file %s: %w", stateFilePath, statErr)
 	}
 
 	// Get working directory and binary path
 	wd, err := os.Getwd()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get current directory: %w", err)
+		return nil, fmt.Errorf("failed to get current directory: %w", err)
 	}
 
 	// Move up to the project root directory if we're in the propertytest directory
@@ -118,7 +151,7 @@ func SetupPropertyTestClient(t *testing.T, stateFilePath string) (mcpClient *cli
 		buildOutput, buildErr := buildCmd.CombinedOutput()
 		if buildErr != nil {
 			// Return error instead of calling t.Fatalf
-			return nil, nil, nil, fmt.Errorf("failed to build flashcards binary: %v\nOutput: %s", buildErr, buildOutput)
+			return nil, fmt.Errorf("failed to build flashcards binary: %v\nOutput: %s", buildErr, buildOutput)
 		}
 		t.Logf("Successfully built flashcards binary.")
 	}
@@ -132,11 +165,8 @@ func SetupPropertyTestClient(t *testing.T, stateFilePath string) (mcpClient *cli
 	)
 	if err != nil {
 		// Return error instead of calling t.Fatalf
-		return nil, nil, nil, fmt.Errorf("failed to create client with file %s: %w", stateFilePath, err)
+		return nil, fmt.Errorf("failed to create client with file %s: %w", stateFilePath, err)
 	}
-
-	// Create context with timeout
-	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 
 	// Initialize the client
 	initRequest := mcp.InitializeRequest{}
@@ -149,12 +179,11 @@ func SetupPropertyTestClient(t *testing.T, stateFilePath string) (mcpClient *cli
 	_, initErr := mcpClient.Initialize(ctx, initRequest)
 	if initErr != nil {
 		mcpClient.Close() // Close the client if initialization fails
-		cancel()          // Cancel the context
 		// Return error instead of calling t.Fatalf
-		return nil, nil, nil, fmt.Errorf("failed to initialize MCP client with file %s: %w", stateFilePath, initErr)
+		return nil, fmt.Errorf("failed to initialize MCP client with file %s: %w", stateFilePath, initErr)
 	}
 
-	return mcpClient, ctx, cancel, nil // Return nil error on success
+	return mcpClient, nil // Return nil error on success
 }
 
 // --- Generators ---

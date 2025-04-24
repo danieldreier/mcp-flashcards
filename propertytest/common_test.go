@@ -58,22 +58,23 @@ func SetupTestClientWithLongTimeout(t *testing.T, timeoutSeconds int) (*client.C
 		return nil, nil, nil, nil, fmt.Errorf("failed to create temp state file: %w", err)
 	}
 
-	// Setup client using the state file (SetupPropertyTestClient handles its own internal timeout for setup)
-	mcpClient, baseCtx, baseCancel, err := SetupPropertyTestClient(t, stateFilePath)
+	// Create the long-lived context first
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+	t.Logf("Created context with %d second timeout", timeoutSeconds)
+
+	// Setup client using the state file with the long-lived context
+	mcpClient, _, _, err := SetupPropertyTestClientWithContext(t, stateFilePath, ctx)
 	if err != nil {
-		tempCleanup()
+		cancel()      // Cancel the context if client setup fails
+		tempCleanup() // Clean up temp files
 		return nil, nil, nil, nil, fmt.Errorf("failed to setup property test client: %w", err)
 	}
-
-	// Replace the setup context with a longer one for the test duration
-	baseCancel() // Cancel the short-lived setup context
-	longCtx, longCancel := context.WithTimeout(baseCtx, time.Duration(timeoutSeconds)*time.Second)
 
 	// Combine client/context cleanup with temp state cleanup
 	fullCleanup := func() {
 		t.Logf("Running combined cleanup for SetupTestClientWithLongTimeout")
-		if longCancel != nil {
-			longCancel()
+		if cancel != nil {
+			cancel()
 		}
 		if mcpClient != nil {
 			mcpClient.Close()
@@ -81,7 +82,7 @@ func SetupTestClientWithLongTimeout(t *testing.T, timeoutSeconds int) (*client.C
 		tempCleanup() // Call the temp state cleanup
 	}
 
-	return mcpClient, longCtx, longCancel, fullCleanup, nil
+	return mcpClient, ctx, cancel, fullCleanup, nil
 }
 
 // FlashcardSUTFactory creates a new FlashcardSUT instance for testing
