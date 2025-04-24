@@ -1,7 +1,11 @@
 package propertytest
 
 import (
+	"math/rand"
+	"os"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/leanovate/gopter"
 	gopterCmds "github.com/leanovate/gopter/commands" // Renamed import
@@ -10,10 +14,30 @@ import (
 
 // TestCommandSequences verifies the consistency of the system through random command sequences.
 func TestCommandSequences(t *testing.T) {
-	parameters := gopter.DefaultTestParameters()
+	// Handle random seed
+	seedStr := os.Getenv("GOPTER_SEED")
+	var seed int64
+	var err error
+	if seedStr != "" {
+		seed, err = strconv.ParseInt(seedStr, 10, 64)
+		if err != nil {
+			t.Logf("Warning: Invalid GOPTER_SEED '%s', generating a new seed. Error: %v", seedStr, err)
+			seed = time.Now().UnixNano()
+		} else {
+			t.Logf("Using seed from GOPTER_SEED environment variable: %d", seed)
+		}
+	} else {
+		seed = time.Now().UnixNano()
+		t.Logf("GOPTER_SEED not set, using generated seed: %d", seed)
+	}
+
+	// Use the seed to initialize test parameters
+	parameters := gopter.DefaultTestParametersWithSeed(seed)
 	parameters.MinSuccessfulTests = 30
 	parameters.MaxSize = 15
-	// parameters.Rng = gopter.NewStdRandSource(1234) // For deterministic runs
+	// Ensure math/rand is also seeded for any other potential uses within the test or SUT
+	// Although gopter uses its own Rng, seeding the global one is good practice.
+	rand.Seed(seed)
 
 	properties := gopter.NewProperties(parameters)
 
