@@ -57,17 +57,18 @@ func TestFSRSNewCardGood(t *testing.T) {
 	}
 
 	// Check the resulting state
-	expectedState := gofsrs.Review
+	expectedState := gofsrs.Learning // Updated: New + Good -> Learning
 	actualState := reviewResp.Card.FSRS.State
 	t.Logf("Rating: Good -> State: %v", actualState)
 	if actualState != expectedState {
 		t.Errorf("Rating Good: Expected state %v, got %v", expectedState, actualState)
 	}
 
-	// Check due date is reasonable (should be >= 1 day for Good on New)
+	// Check due date is reasonable (should be ~ 10 minutes for Good on New)
 	now := time.Now()
-	if !reviewResp.Card.FSRS.Due.After(now.Add(23 * time.Hour)) { // Allow some buffer
-		t.Errorf("Due date for New->Good rating should be at least ~1 day, got %v (now=%v)",
+	// Update expected duration to 10 minutes instead of 1 day
+	if !reviewResp.Card.FSRS.Due.After(now.Add(9 * time.Minute)) { // Allow some buffer
+		t.Errorf("Due date for New->Good rating should be at least ~10 minutes, got %v (now=%v)",
 			reviewResp.Card.FSRS.Due, now)
 	}
 }

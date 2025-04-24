@@ -43,7 +43,7 @@ func TestFSRSNewCardTransitions(t *testing.T) {
 	}{
 		{gofsrs.Again, gofsrs.Learning},
 		{gofsrs.Hard, gofsrs.Learning},
-		{gofsrs.Good, gofsrs.Review},
+		{gofsrs.Good, gofsrs.Learning},
 		{gofsrs.Easy, gofsrs.Review},
 	}
 

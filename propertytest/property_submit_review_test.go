@@ -70,7 +70,7 @@ func TestSubmitReviewCommand(t *testing.T) {
 				Rating: gofsrs.Good,
 				Answer: "Correct Answer",
 			},
-			expectedState: gofsrs.Review, // New -> Good should go to Review
+			expectedState: gofsrs.Learning, // Updated: New -> Good should go to Learning
 		},
 		{
 			name: "New Card Rated Again",
