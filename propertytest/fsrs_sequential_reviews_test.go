@@ -8,190 +8,92 @@ import (
 	gofsrs "github.com/open-spaced-repetition/go-fsrs"
 )
 
-// TestFSRSSequentialReviews tests how FSRS handles sequential reviews of the same card,
-// verifying correct state transitions between different states of the FSRS algorithm.
+// TestFSRSSequentialReviews tests multiple reviews on the same card
+// to verify state transitions and due date calculations over time.
 func TestFSRSSequentialReviews(t *testing.T) {
-	// Setup a client with a longer timeout (300 seconds = 5 minutes)
-	// Sequential reviews need more time to complete all the steps
-	mcpClient, ctx, cancel, baseCleanup := SetupTestClientWithLongTimeout(t, 300)
-	defer func() {
-		cancel()
-		mcpClient.Close()
-		baseCleanup()
-	}()
-
-	// Create a SUT using the factory
-	sut := FlashcardSUTFactory(mcpClient, ctx, cancel, baseCleanup, t)
-
-	// Test different sequences of ratings
-	sequences := []struct {
-		name    string
-		ratings []gofsrs.Rating
-	}{
-		{
-			name:    "New_Good_Good", // Test New -> Learning -> Review transition
-			ratings: []gofsrs.Rating{gofsrs.Good, gofsrs.Good},
-		},
-		{
-			name:    "New_Again_Good", // Test New -> Learning -> Learning transition
-			ratings: []gofsrs.Rating{gofsrs.Again, gofsrs.Good},
-		},
-		{
-			name:    "New_Good_Again", // Test New -> Learning -> Relearning
-			ratings: []gofsrs.Rating{gofsrs.Good, gofsrs.Again},
-		},
-		{
-			name:    "New_Easy_Again_Good", // Test New -> Review -> Relearning -> Review
-			ratings: []gofsrs.Rating{gofsrs.Easy, gofsrs.Again, gofsrs.Good},
-		},
+	mcpClient, ctx, _, clientCleanup, err := SetupTestClientWithLongTimeout(t, 300) // Longer timeout for sequential reviews
+	if err != nil {
+		t.Fatalf("Failed to setup client: %v", err)
 	}
+	defer clientCleanup()
 
-	for _, seq := range sequences {
-		t.Run(seq.name, func(t *testing.T) {
-			// Create a new card for this sequence
-			createCard := &CreateCardCmd{
-				Front: fmt.Sprintf("Test Card Front - Sequence %s", seq.name),
-				Back:  fmt.Sprintf("Test Card Back - Sequence %s", seq.name),
-				Tags:  []string{"test", "sequence", seq.name},
-			}
-			createResult := createCard.Run(sut)
-			createResp, ok := createResult.(CreateCardResponse)
-			if !ok {
-				t.Fatalf("Failed to create card: %v", createResult)
-			}
+	sut := FlashcardSUTFactory(mcpClient, ctx, nil, nil, t)
 
-			cardID := createResp.Card.ID
-			t.Logf("Created test card with ID: %s, Initial FSRS State: %v",
-				cardID, createResp.Card.FSRS.State)
-
-			// Keep track of the current card state for our model
-			currentCard := Card{
-				ID:    cardID,
-				Front: fmt.Sprintf("Test Card Front - Sequence %s", seq.name),
-				Back:  fmt.Sprintf("Test Card Back - Sequence %s", seq.name),
-				Tags:  []string{"test", "sequence", seq.name},
-				FSRS:  createResp.Card.FSRS,
-			}
-
-			// Apply each rating in sequence
-			for i, rating := range seq.ratings {
-				t.Logf("Applying rating %d (%d of %d)",
-					rating, i+1, len(seq.ratings))
-
-				// Create a review command for this step
-				submitReview := &SubmitReviewCmd{
-					CardID: cardID,
-					Rating: rating,
-					Answer: fmt.Sprintf("Test answer for rating %d (step %d)",
-						rating, i+1),
-				}
-
-				// Create a mock state with the current card state
-				mockState := &CommandState{
-					Cards: map[string]Card{
-						cardID: currentCard,
-					},
-					KnownRealIDs: []string{cardID},
-					LastRealID:   cardID,
-					T:            t,
-				}
-
-				// Calculate the expected next state using our model
-				submitReview.NextState(mockState)
-
-				// Log the expected values
-				t.Logf("Current state before review: %v", currentCard.FSRS.State)
-				t.Logf("Expected state after review: %v", submitReview.ExpectedFSRSState)
-
-				// Run the actual command
-				result := submitReview.Run(sut)
-
-				// Verify the result
-				reviewResp, ok := result.(ReviewResponse)
-				if !ok {
-					t.Fatalf("Failed to submit review: %v", result)
-				}
-
-				if !reviewResp.Success {
-					t.Fatalf("Review was not successful: %s", reviewResp.Message)
-				}
-
-				// Log actual values
-				t.Logf("Actual FSRS state after review: %v", reviewResp.Card.FSRS.State)
-				t.Logf("Actual due date: %v", reviewResp.Card.FSRS.Due)
-
-				// Verify predictions match the implementation
-				if reviewResp.Card.FSRS.State != submitReview.ExpectedFSRSState {
-					t.Errorf("FSRS state mismatch for rating %d (step %d): expected %v, got %v",
-						rating, i+1, submitReview.ExpectedFSRSState, reviewResp.Card.FSRS.State)
-				}
-
-				// Check due date
-				timeDiff := reviewResp.Card.FSRS.Due.Sub(submitReview.ExpectedDueDate).Abs()
-				t.Logf("Due date difference: %v", timeDiff)
-
-				if timeDiff > 5*time.Hour {
-					t.Errorf("Due date difference too large for rating %d (step %d): %v",
-						rating, i+1, timeDiff)
-				}
-
-				// Update our model of the current card state for the next iteration
-				currentCard.FSRS = reviewResp.Card.FSRS
-			}
-
-			// After all reviews, verify the final state is as expected
-			expectedFinalState := getExpectedFinalState(seq.ratings)
-
-			t.Logf("Final state after sequence %s: %v",
-				seq.name, currentCard.FSRS.State)
-
-			if currentCard.FSRS.State != expectedFinalState {
-				t.Errorf("Final state mismatch for sequence %s: expected %v, got %v",
-					seq.name, expectedFinalState, currentCard.FSRS.State)
-			}
-		})
+	// Create a card
+	createCard := &CreateCardCmd{
+		Front: "Sequential Review Front",
+		Back:  "Sequential Review Back",
+		Tags:  []string{"sequential-test"},
 	}
-}
-
-// getExpectedFinalState returns the expected final state for a sequence of ratings
-// based on FSRS algorithm documentation and actual observed behavior
-func getExpectedFinalState(ratings []gofsrs.Rating) gofsrs.State {
-	if len(ratings) == 0 {
-		return gofsrs.New // Default, empty sequence
+	createResult := createCard.Run(sut)
+	createResp, ok := createResult.(CreateCardResponse)
+	if !ok {
+		t.Fatalf("Failed to create card: %v", createResult)
 	}
+	cardID := createResp.Card.ID
+	t.Logf("Created card %s with initial state: %v", cardID, createResp.Card.FSRS.State)
 
-	// For the sequences we're testing, matching actual FSRS implementation behavior
-	// New -> Good -> Good = Review (graduated after second good rating)
-	// New -> Again -> Good = Review (implementation graduates to Review, not Learning)
-	// New -> Good -> Again = Learning (implementation uses Learning, not Relearning)
-	// New -> Easy -> Again -> Good = Review (back to review after relearning)
+	// Review sequence
+	reviews := []gofsrs.Rating{gofsrs.Good, gofsrs.Again, gofsrs.Good, gofsrs.Good, gofsrs.Easy, gofsrs.Hard}
+	now := time.Now() // Base time for reviews
 
-	if len(ratings) >= 2 {
-		// New -> Good -> Good = Review
-		if ratings[0] == gofsrs.Good && ratings[1] == gofsrs.Good {
-			return gofsrs.Review
+	// Variables to track expected FSRS state using direct library calls
+	libraryCard := createResp.Card.FSRS // Start with the card's initial FSRS state
+	libraryParams := gofsrs.DefaultParam()
+
+	for i, rating := range reviews {
+		// Run review in the service
+		submitReview := &SubmitReviewCmd{
+			CardID: cardID,
+			Rating: rating,
+			Answer: fmt.Sprintf("Answer for review %d (rating %d)", i+1, rating),
+		}
+		result := submitReview.Run(sut)
+		reviewResp, ok := result.(ReviewResponse)
+		if !ok {
+			// Handle potential errors
+			err, isErr := result.(error)
+			if isErr {
+				t.Fatalf("Review %d (Rating %d) failed: %v", i+1, rating, err)
+			} else {
+				t.Fatalf("Review %d (Rating %d) returned unexpected type: %T", i+1, rating, result)
+			}
+		}
+		if !reviewResp.Success {
+			t.Fatalf("Review %d (Rating %d) was not successful: %s", i+1, rating, reviewResp.Message)
 		}
 
-		// New -> Again -> Good = Review (implementation behavior)
-		// Note: This is different from expected model, but matches actual implementation
-		if ratings[0] == gofsrs.Again && ratings[1] == gofsrs.Good {
-			return gofsrs.Review
+		// Calculate expected result using direct library call with the *current* libraryCard state
+		schedule := libraryParams.Repeat(libraryCard, now)
+		expectedLibraryCard := schedule[rating].Card
+
+		// Compare service result with direct library calculation
+		serviceCardFSRS := reviewResp.Card.FSRS
+		t.Logf("--- Review %d (Rating: %d) --- NOW=%v", i+1, rating, now.Format(time.RFC3339))
+		t.Logf("Library -> State: %v, Due: %v (in %v)", expectedLibraryCard.State, expectedLibraryCard.Due.Format(time.RFC3339), expectedLibraryCard.Due.Sub(now))
+		t.Logf("Service -> State: %v, Due: %v (in %v)", serviceCardFSRS.State, serviceCardFSRS.Due.Format(time.RFC3339), serviceCardFSRS.Due.Sub(now))
+
+		// Compare states
+		if serviceCardFSRS.State != expectedLibraryCard.State {
+			t.Errorf("Review %d (Rating %d): State mismatch. Expected(Lib) %v, Got(Svc) %v",
+				i+1, rating, expectedLibraryCard.State, serviceCardFSRS.State)
 		}
 
-		// New -> Good -> Again = Learning (implementation behavior)
-		// Note: This is different from expected model, but matches actual implementation
-		if ratings[0] == gofsrs.Good && ratings[1] == gofsrs.Again {
-			return gofsrs.Learning
+		// Compare due dates (allow small tolerance)
+		if serviceCardFSRS.Due.Sub(expectedLibraryCard.Due).Abs() > 5*time.Second {
+			t.Errorf("Review %d (Rating %d): Due date mismatch. Expected(Lib) %v, Got(Svc) %v",
+				i+1, rating, expectedLibraryCard.Due.Format(time.RFC3339), serviceCardFSRS.Due.Format(time.RFC3339))
+		}
+
+		// Update library card state for the next iteration
+		libraryCard = expectedLibraryCard
+
+		// Advance time for the next review based on library prediction
+		if libraryCard.ScheduledDays > 0 {
+			now = now.AddDate(0, 0, int(libraryCard.ScheduledDays))
+		} else {
+			// If no days scheduled, simulate passing a short time (e.g., minutes)
+			now = now.Add(10 * time.Minute)
 		}
 	}
-
-	if len(ratings) >= 3 {
-		// New -> Easy -> Again -> Good = Review
-		if ratings[0] == gofsrs.Easy && ratings[1] == gofsrs.Again && ratings[2] == gofsrs.Good {
-			return gofsrs.Review
-		}
-	}
-
-	// Default fallback - would need more comprehensive logic for other sequences
-	return gofsrs.Learning
 }

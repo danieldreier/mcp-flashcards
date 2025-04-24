@@ -49,15 +49,16 @@ func handleGetDueCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 		// Default error message
 		errorMsg := fmt.Sprintf("Error getting due card: %v", err)
 
-		// Customize error message based on specific error type from service
-		if strings.Contains(err.Error(), "no cards due for review") {
-			if len(filterTags) > 0 {
-				errorMsg = fmt.Sprintf("No cards due for review with the specified tags: %v", filterTags)
-			} else {
-				errorMsg = "No cards due for review"
-			}
-		} else if strings.Contains(err.Error(), "no cards found with the specified tags") {
+		// *** Check for specific tag error FIRST ***
+		if strings.Contains(err.Error(), "no cards found with the specified tags") {
+			// Use the specific error message from the service layer
 			errorMsg = fmt.Sprintf("No cards found with the specified tags: %v", filterTags)
+		} else if strings.Contains(err.Error(), "no cards due for review") { // Now check for generic "no cards due"
+			// Use the generic message (service layer doesn't distinguish tags here anymore)
+			errorMsg = "No cards due for review"
+			// Note: The previous logic here that added tag info was redundant
+			// because the service layer now returns the specific error above
+			// if tags were the reason no cards were found/due.
 		}
 
 		// Always include stats in the error response if available (stats are calculated even if GetDueCard returns error)
@@ -93,37 +94,53 @@ func handleGetDueCard(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 // for a flashcard with the given rating (1-4) and optional answer text.
 // It updates the card's FSRS scheduling data based on the review result.
 func handleSubmitReview(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Start time tracking for performance analysis
+	startTime := time.Now()
+	fmt.Printf("[DEBUG] handleSubmitReview starting at %v\n", startTime.Format(time.RFC3339Nano))
+
 	// Extract required parameters
 	cardID, ok := request.Params.Arguments["card_id"].(string)
 	if !ok {
+		fmt.Printf("[DEBUG] Missing required parameter: card_id\n")
 		return mcp.NewToolResultText("Missing required parameter: card_id"), nil
 	}
+	fmt.Printf("[DEBUG] Processing review for card ID: %s\n", cardID)
 
 	ratingFloat, ok := request.Params.Arguments["rating"].(float64)
 	if !ok {
+		fmt.Printf("[DEBUG] Missing required parameter: rating\n")
 		return mcp.NewToolResultText("Missing required parameter: rating"), nil
 	}
 
 	rating := int(ratingFloat)
 	if rating < 1 || rating > 4 {
+		fmt.Printf("[DEBUG] Invalid rating: %d\n", rating)
 		return mcp.NewToolResultText("Rating must be between 1 and 4"), nil
 	}
+	fmt.Printf("[DEBUG] Review rating: %d\n", rating)
 
 	// Extract optional parameter
 	answer, _ := request.Params.Arguments["answer"].(string)
+	fmt.Printf("[DEBUG] Review answer: %s\n", answer)
 
 	// Get the service from context
 	s, ok := ctx.Value("service").(*FlashcardService)
 	if !ok || s == nil {
+		fmt.Printf("[DEBUG] Error: Service not available\n")
 		return mcp.NewToolResultText("Error: Service not available"), nil
 	}
+	fmt.Printf("[DEBUG] Retrieved service from context\n")
 
 	// Convert rating to fsrs.Rating
 	fsrsRating := gofsrs.Rating(rating)
 
 	// Call service method to submit review
+	fmt.Printf("[DEBUG] Calling service.SubmitReview() at %v\n", time.Now().Format(time.RFC3339Nano))
 	updatedCard, err := s.SubmitReview(cardID, fsrsRating, answer)
+	fmt.Printf("[DEBUG] service.SubmitReview() completed at %v\n", time.Now().Format(time.RFC3339Nano))
+
 	if err != nil {
+		fmt.Printf("[DEBUG] Error submitting review: %v\n", err)
 		return mcp.NewToolResultText(fmt.Sprintf(`{"error": "Error submitting review: %v"}`, err)), nil
 	}
 
@@ -134,10 +151,15 @@ func handleSubmitReview(ctx context.Context, request mcp.CallToolRequest) (*mcp.
 		Card:    updatedCard,
 	}
 
+	fmt.Printf("[DEBUG] Creating JSON response at %v\n", time.Now().Format(time.RFC3339Nano))
 	jsonBytes, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
+		fmt.Printf("[DEBUG] Error marshaling response: %v\n", err)
 		return nil, err
 	}
+
+	elapsed := time.Since(startTime)
+	fmt.Printf("[DEBUG] handleSubmitReview completed in %v at %v\n", elapsed, time.Now().Format(time.RFC3339Nano))
 
 	return mcp.NewToolResultText(string(jsonBytes)), nil
 }

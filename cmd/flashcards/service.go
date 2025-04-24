@@ -129,15 +129,21 @@ func equalStringSlices(a, b []string) bool {
 
 // DeleteCard deletes a flashcard
 func (s *FlashcardService) DeleteCard(cardID string) error {
+	fmt.Printf("[DEBUG-SVC-DELETE] Starting DeleteCard for ID %s\n", cardID)
 	// Delete the card from storage
 	if err := s.Storage.DeleteCard(cardID); err != nil {
+		fmt.Printf("[DEBUG-SVC-DELETE] Storage.DeleteCard returned error: %v\n", err)
 		return fmt.Errorf("error deleting card: %w", err)
 	}
+	fmt.Printf("[DEBUG-SVC-DELETE] Card deleted from storage successfully\n")
 
 	// Persist changes to disk
+	fmt.Printf("[DEBUG-SVC-DELETE] Now calling Storage.Save()\n")
 	if err := s.Storage.Save(); err != nil {
+		fmt.Printf("[DEBUG-SVC-DELETE] Storage.Save() returned error: %v\n", err)
 		return fmt.Errorf("error saving storage: %w", err)
 	}
+	fmt.Printf("[DEBUG-SVC-DELETE] Storage.Save() completed successfully\n")
 
 	return nil
 }
@@ -183,24 +189,52 @@ func (s *FlashcardService) ListCards(filterTags []string, includeStats bool) ([]
 
 // GetDueCard returns the next card due for review with statistics, optionally filtered by tags
 func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, error) {
+	fmt.Printf("[DEBUG-SVC] GetDueCard called with filterTags: %v\n", filterTags)
 	// Get all cards from storage first to calculate overall statistics
 	allCards, err := s.Storage.ListCards(nil)
 	if err != nil {
+		fmt.Printf("[DEBUG-SVC] GetDueCard: error listing all cards: %v\n", err)
 		return Card{}, CardStats{}, fmt.Errorf("error listing all cards: %w", err)
 	}
+	fmt.Printf("[DEBUG-SVC] GetDueCard: Found %d total cards in storage.\n", len(allCards))
+
+	// Debug - print all card IDs
+	fmt.Printf("[DEBUG-SVC] All card IDs: [")
+	for _, card := range allCards {
+		fmt.Printf("%s, ", card.ID)
+	}
+	fmt.Printf("]\n")
 
 	// Calculate overall statistics based on all cards
 	stats := s.calculateStats(allCards)
 
-	// Get cards matching filter (reuse ListCards)
-	cardsToConsider, err := s.Storage.ListCards(filterTags)
-	if err != nil {
-		// Should not happen if ListCards(nil) worked, but handle anyway
-		return Card{}, stats, fmt.Errorf("error listing cards with filter tags: %w", err)
+	// If no filter tags were provided, get all cards
+	var cardsToConsider []storage.Card
+	if len(filterTags) == 0 {
+		fmt.Printf("[DEBUG-SVC] GetDueCard: No filter tags provided, considering all %d cards.\n", len(allCards))
+		cardsToConsider = allCards
+	} else {
+		fmt.Printf("[DEBUG-SVC] GetDueCard: Filtering %d cards by tags: %v\n", len(allCards), filterTags)
+		// When filter tags are provided, we need to find cards with ALL the specified tags
+		for i, card := range allCards {
+			matches := hasAllRequiredTags(&card, filterTags)
+			fmt.Printf("[DEBUG-SVC] GetDueCard: Checking card %d (ID: %s, Tags: %v) against filter %v -> Matches: %t\n", i, card.ID, card.Tags, filterTags, matches)
+			if matches {
+				cardsToConsider = append(cardsToConsider, card)
+			}
+		}
+		fmt.Printf("[DEBUG-SVC] GetDueCard: Filtering complete. %d cards matched the tags.\n", len(cardsToConsider))
+
+		// If no cards match the tag filter, return an error
+		if len(cardsToConsider) == 0 {
+			fmt.Printf("[DEBUG-SVC] GetDueCard: No cards matched tags, returning error.\n")
+			return Card{}, stats, fmt.Errorf("no cards found with the specified tags: %v", filterTags)
+		}
 	}
 
 	// Current time for priority calculation
 	now := time.Now()
+	fmt.Printf("[DEBUG-SVC] GetDueCard: Finding due cards among %d considered cards.\n", len(cardsToConsider))
 
 	// Find due cards from the filtered list and calculate priority
 	var dueCards []struct {
@@ -209,8 +243,10 @@ func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, err
 	}
 
 	for _, storageCard := range cardsToConsider { // Iterate over the filtered list
+		cardIsDue := !storageCard.FSRS.Due.After(now)
+		fmt.Printf("[DEBUG-SVC] GetDueCard: Checking considered card ID %s (Due: %v, IsDue: %t)\n", storageCard.ID, storageCard.FSRS.Due, cardIsDue)
 		// Consider cards due now or in the past
-		if !storageCard.FSRS.Due.After(now) {
+		if cardIsDue {
 			priority := s.FSRSManager.GetReviewPriority(storageCard.FSRS.State, storageCard.FSRS.Due, now)
 			// Convert storage.Card to our main Card type here
 			card := Card{
@@ -225,8 +261,10 @@ func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, err
 				card     Card
 				priority float64
 			}{card, priority})
+			fmt.Printf("[DEBUG-SVC] GetDueCard: Added due card ID %s to list (Priority: %f)\n", card.ID, priority)
 		}
 	}
+	fmt.Printf("[DEBUG-SVC] GetDueCard: Found %d due cards among considered cards.\n", len(dueCards))
 
 	// Sort the due cards (from the filtered list) by priority (highest first)
 	sort.Slice(dueCards, func(i, j int) bool {
@@ -235,18 +273,49 @@ func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, err
 
 	// Return highest priority card from the filtered set or error if none due
 	if len(dueCards) == 0 {
-		// Check if the filter was the reason for no due cards
-		if len(filterTags) > 0 && len(cardsToConsider) == 0 {
-			return Card{}, stats, fmt.Errorf("no cards found with the specified tags: %v", filterTags)
-		} else if len(filterTags) > 0 {
+		if len(filterTags) > 0 {
+			fmt.Printf("[DEBUG-SVC] GetDueCard: No DUE cards matched tags, returning error.\n")
 			return Card{}, stats, fmt.Errorf("no cards due for review with the specified tags: %v", filterTags)
 		}
 		// No filter, but no cards due
+		fmt.Printf("[DEBUG-SVC] GetDueCard: No cards are due for review, returning error.\n")
 		return Card{}, stats, fmt.Errorf("no cards due for review")
 	}
 
 	// Return the highest priority card from the filtered due list, along with overall stats
+	fmt.Printf("[DEBUG-SVC] GetDueCard: Returning highest priority card ID %s.\n", dueCards[0].card.ID)
 	return dueCards[0].card, stats, nil
+}
+
+// Helper function to ensure all required tags are present in a card
+func hasAllRequiredTags(card *storage.Card, requiredTags []string) bool {
+	if len(requiredTags) == 0 {
+		return true // No required tags means all cards match
+	}
+
+	if card == nil {
+		return false // Can't match any tags if card is nil
+	}
+
+	// If the card has no tags but we have required tags, it can't match
+	if len(card.Tags) == 0 {
+		return false
+	}
+
+	// Create a map of the card's tags for efficient lookup
+	cardTagsMap := make(map[string]bool)
+	for _, tag := range card.Tags {
+		cardTagsMap[tag] = true
+	}
+
+	// Check if the card has all required tags
+	for _, reqTag := range requiredTags {
+		if !cardTagsMap[reqTag] {
+			return false // Missing a required tag
+		}
+	}
+
+	return true // All required tags found
 }
 
 // calculateStats calculates statistics from card and review data
@@ -297,45 +366,63 @@ func (s *FlashcardService) calculateStats(cards []storage.Card) CardStats {
 
 // SubmitReview processes a review for a card and updates its state using the FSRS algorithm
 func (s *FlashcardService) SubmitReview(cardID string, rating gofsrs.Rating, answer string) (Card, error) {
+	startTime := time.Now()
+	fmt.Printf("[DEBUG-SVC] SubmitReview starting for cardID=%s, rating=%d at %v\n",
+		cardID, rating, startTime.Format(time.RFC3339Nano))
+
 	// Get the card from storage
+	fmt.Printf("[DEBUG-SVC] Retrieving card from storage\n")
 	storageCard, err := s.Storage.GetCard(cardID)
 	if err != nil {
+		fmt.Printf("[DEBUG-SVC] Error getting card: %v\n", err)
 		return Card{}, fmt.Errorf("error getting card: %w", err)
 	}
+	fmt.Printf("[DEBUG-SVC] Retrieved card with current state=%v, due=%v\n",
+		storageCard.FSRS.State, storageCard.FSRS.Due)
 
 	now := time.Now()
 
 	// Use FSRS manager to schedule the review using the go-fsrs library
-	// Pass the entire FSRS state from the card
+	fmt.Printf("[DEBUG-SVC] Calling FSRSManager.ScheduleReview\n")
 	updatedState, newDueDate := s.FSRSManager.ScheduleReview(
 		storageCard.FSRS, // Pass the entire FSRS card
 		rating,
 		now,
 	)
+	fmt.Printf("[DEBUG-SVC] FSRS schedule result: newState=%v, newDueDate=%v\n",
+		updatedState, newDueDate)
 
 	// Update the card with new state information
+	fmt.Printf("[DEBUG-SVC] Updating card FSRS state\n")
 	storageCard.FSRS.State = updatedState
 	storageCard.FSRS.Due = newDueDate // Use the returned due date
 	storageCard.LastReviewedAt = now  // Record last reviewed time (field should exist now)
 
 	// Save the updated card state back to storage
+	fmt.Printf("[DEBUG-SVC] Updating card in storage at %v\n", time.Now().Format(time.RFC3339Nano))
 	if err := s.Storage.UpdateCard(storageCard); err != nil {
+		fmt.Printf("[DEBUG-SVC] Error updating card: %v\n", err)
 		return Card{}, fmt.Errorf("error updating card: %w", err)
 	}
 
 	// Add review to storage
-	// The storage AddReview should probably update the FSRS fields on the review log itself.
+	fmt.Printf("[DEBUG-SVC] Adding review to storage at %v\n", time.Now().Format(time.RFC3339Nano))
 	reviewLog, err := s.Storage.AddReview(cardID, rating, answer)
 	if err != nil {
+		fmt.Printf("[DEBUG-SVC] Error adding review: %v\n", err)
 		// Attempt to rollback card update? Maybe too complex for now.
 		return Card{}, fmt.Errorf("error adding review: %w", err)
 	}
 	_ = reviewLog // Use reviewLog if needed later
+	fmt.Printf("[DEBUG-SVC] Review added successfully\n")
 
 	// Persist changes to disk
+	fmt.Printf("[DEBUG-SVC] Saving storage to disk at %v\n", time.Now().Format(time.RFC3339Nano))
 	if err := s.Storage.Save(); err != nil {
+		fmt.Printf("[DEBUG-SVC] Error saving storage: %v\n", err)
 		return Card{}, fmt.Errorf("error saving storage: %w", err)
 	}
+	fmt.Printf("[DEBUG-SVC] Storage saved successfully\n")
 
 	// Convert updated storage.Card to our main Card type
 	updatedCard := Card{
@@ -346,6 +433,10 @@ func (s *FlashcardService) SubmitReview(cardID string, rating gofsrs.Rating, ans
 		Tags:      storageCard.Tags,
 		FSRS:      storageCard.FSRS,
 	}
+
+	elapsed := time.Since(startTime)
+	fmt.Printf("[DEBUG-SVC] SubmitReview completed in %v at %v\n",
+		elapsed, time.Now().Format(time.RFC3339Nano))
 
 	return updatedCard, nil
 }

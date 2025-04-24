@@ -129,6 +129,12 @@ func (fs *FileStorage) CreateCard(front, back string, tags []string) (Card, erro
 	fs.store.Cards[id] = card
 	fs.store.LastUpdated = now
 
+	// Persist changes to disk immediately to prevent state leakage
+	err := fs.save()
+	if err != nil {
+		return Card{}, err
+	}
+
 	return card, nil
 }
 
@@ -157,7 +163,8 @@ func (fs *FileStorage) UpdateCard(card Card) error {
 	fs.store.Cards[card.ID] = card
 	fs.store.LastUpdated = time.Now()
 
-	return nil
+	// Persist changes to disk immediately to prevent state leakage
+	return fs.save()
 }
 
 // DeleteCard deletes a flashcard by ID
@@ -165,17 +172,45 @@ func (fs *FileStorage) DeleteCard(id string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
+	fmt.Printf("[DEBUG-DELETE] Starting DeleteCard for ID %s\n", id)
+	fmt.Printf("[DEBUG-DELETE] Current cards count: %d\n", len(fs.store.Cards))
+
 	if _, exists := fs.store.Cards[id]; !exists {
+		fmt.Printf("[DEBUG-DELETE] Card %s not found in memory\n", id)
 		return ErrCardNotFound
 	}
 
+	fmt.Printf("[DEBUG-DELETE] Card %s found in memory, deleting\n", id)
+	// Delete the card
 	delete(fs.store.Cards, id)
+	fmt.Printf("[DEBUG-DELETE] After delete, cards count: %d\n", len(fs.store.Cards))
+
+	// Delete all reviews associated with this card
+	oldReviewsCount := len(fs.store.Reviews)
+	newReviews := []Review{}
+	for _, review := range fs.store.Reviews {
+		if review.CardID != id {
+			newReviews = append(newReviews, review)
+		}
+	}
+	fs.store.Reviews = newReviews
+	fmt.Printf("[DEBUG-DELETE] Reviews count: before=%d, after=%d\n", oldReviewsCount, len(fs.store.Reviews))
+
 	fs.store.LastUpdated = time.Now()
+
+	// Persist changes to disk immediately to prevent state leakage
+	fmt.Printf("[DEBUG-DELETE] Calling save() to persist changes\n")
+	err := fs.save()
+	if err != nil {
+		fmt.Printf("[DEBUG-DELETE] Error during save(): %v\n", err)
+		return err
+	}
+	fmt.Printf("[DEBUG-DELETE] save() completed successfully\n")
 
 	return nil
 }
 
-// ListCards returns a list of all flashcards, optionally filtered by tags (must contain ANY of the tags)
+// ListCards returns a list of all flashcards, optionally filtered by tags (must contain ALL of the tags)
 func (fs *FileStorage) ListCards(tags []string) ([]Card, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
@@ -195,9 +230,9 @@ func (fs *FileStorage) ListCards(tags []string) ([]Card, error) {
 		return result, nil
 	}
 
-	// Filter cards: card must have ANY of the specified tags (OR logic)
+	// Filter cards: card must have ALL of the specified tags (AND logic)
 	for _, card := range fs.store.Cards {
-		if hasAnyTag(&card, tags) {
+		if hasAllTags(&card, tags) {
 			result = append(result, card)
 		}
 	}
@@ -210,8 +245,10 @@ func hasAnyTag(card *Card, requiredTags []string) bool {
 	if len(requiredTags) == 0 {
 		return true // No filter means match
 	}
-	if card == nil || card.Tags == nil {
-		return false // Cannot have any tags if card or tags are nil
+
+	// If card has no tags but we have required tags, it can't match
+	if card == nil || len(card.Tags) == 0 {
+		return false
 	}
 
 	// Create a map of the card's tags for efficient lookup
@@ -277,6 +314,12 @@ func (fs *FileStorage) AddReview(cardID string, rating fsrs.Rating, answer strin
 
 	fs.store.Reviews = append(fs.store.Reviews, review)
 	fs.store.LastUpdated = now
+
+	// Persist changes to disk immediately to prevent state leakage
+	err := fs.save()
+	if err != nil {
+		return Review{}, err
+	}
 
 	return review, nil
 }
@@ -395,54 +438,63 @@ func (fs *FileStorage) DeleteDueDate(id string) error {
 // save is the internal helper for saving data without acquiring the lock again.
 // Assumes the lock (write lock) is already held.
 func (fs *FileStorage) save() error {
+	fmt.Printf("[DEBUG-STORAGE] save: Starting internal save operation\n")
+
 	// Ensure data structure is initialized before marshaling
 	// (Redundant if Load initializes, but safe)
 	if fs.store.Cards == nil {
+		fmt.Printf("[DEBUG-STORAGE] save: Initializing empty Cards map\n")
 		fs.store.Cards = make(map[string]Card)
 	}
 	if fs.store.Reviews == nil {
+		fmt.Printf("[DEBUG-STORAGE] save: Initializing empty Reviews slice\n")
 		fs.store.Reviews = []Review{}
 	}
 	if fs.store.DueDates == nil {
+		fmt.Printf("[DEBUG-STORAGE] save: Initializing empty DueDates slice\n")
 		fs.store.DueDates = []DueDate{}
 	}
 	fs.store.LastUpdated = time.Now() // Update timestamp
 
-	log.Printf("[Storage:save internal] Data BEFORE Marshal - DueDate count: %d", len(fs.store.DueDates))
-	if len(fs.store.DueDates) > 0 {
-		log.Printf("[Storage:save internal] First DueDate Topic: %s", fs.store.DueDates[0].Topic)
-	}
-
+	fmt.Printf("[DEBUG-STORAGE] save: Starting JSON marshal operation\n")
 	dataBytes, err := json.MarshalIndent(fs.store, "", "  ")
 	if err != nil {
+		fmt.Printf("[DEBUG-STORAGE] save: Error marshaling data: %v\n", err)
 		log.Printf("[Storage:save internal] Error marshaling data: %v", err)
 		return fmt.Errorf("failed to marshal storage data: %w", err)
 	}
-
-	log.Printf("[Storage:save internal] Marshaled JSON to save: %s", string(dataBytes))
+	fmt.Printf("[DEBUG-STORAGE] save: JSON marshaling completed, size: %d bytes\n", len(dataBytes))
 
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(fs.filePath)
+	fmt.Printf("[DEBUG-STORAGE] save: Ensuring directory exists: %s\n", dir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Printf("[DEBUG-STORAGE] save: Error creating directory: %v\n", err)
 		log.Printf("[Storage:save internal] Error creating directory: %v", err)
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	// Write to a temporary file
 	tempFile := fs.filePath + ".tmp"
+	fmt.Printf("[DEBUG-STORAGE] save: Writing to temporary file: %s\n", tempFile)
 	if err := os.WriteFile(tempFile, dataBytes, 0644); err != nil {
+		fmt.Printf("[DEBUG-STORAGE] save: Error writing temp file: %v\n", err)
 		os.Remove(tempFile)
 		log.Printf("[Storage:save internal] Error writing temp file: %v", err)
 		return fmt.Errorf("failed to write temporary file: %w", err)
 	}
+	fmt.Printf("[DEBUG-STORAGE] save: Successfully wrote temp file\n")
 
 	// Rename the temporary file to the target file (atomic operation on most systems)
+	fmt.Printf("[DEBUG-STORAGE] save: Renaming temp file to: %s\n", fs.filePath)
 	if err := os.Rename(tempFile, fs.filePath); err != nil {
+		fmt.Printf("[DEBUG-STORAGE] save: Error renaming temp file: %v\n", err)
 		os.Remove(tempFile)
 		log.Printf("[Storage:save internal] Error renaming temp file: %v", err)
 		return fmt.Errorf("failed to rename temporary file: %w", err)
 	}
 
+	fmt.Printf("[DEBUG-STORAGE] save: Save operation completed successfully\n")
 	log.Printf("[Storage:save internal] Save successful.")
 	return nil
 }
@@ -516,8 +568,23 @@ func (fs *FileStorage) Load() error {
 
 // Save saves the flashcards data to the file atomically.
 func (fs *FileStorage) Save() error {
+	fmt.Printf("[DEBUG-STORAGE] Save: Acquiring write lock\n")
+	startLock := time.Now()
 	fs.mu.Lock() // Acquire Write lock for saving
-	defer fs.mu.Unlock()
+	lockTime := time.Since(startLock)
+	fmt.Printf("[DEBUG-STORAGE] Save: Acquired write lock in %v\n", lockTime)
+
+	defer func() {
+		fs.mu.Unlock()
+		fmt.Printf("[DEBUG-STORAGE] Save: Released write lock\n")
+	}()
+
 	// Call internal save helper which assumes lock is held
-	return fs.save()
+	fmt.Printf("[DEBUG-STORAGE] Save: Calling internal save method\n")
+	startSave := time.Now()
+	err := fs.save()
+	saveTime := time.Since(startSave)
+	fmt.Printf("[DEBUG-STORAGE] Save: Internal save completed in %v with err: %v\n", saveTime, err)
+
+	return err
 }

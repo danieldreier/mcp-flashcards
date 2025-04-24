@@ -3,6 +3,7 @@ package propertytest
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,72 +18,125 @@ import (
 	gofsrs "github.com/open-spaced-repetition/go-fsrs"
 )
 
-// setupPropertyTestClient sets up an MCP client for a single property test run.
-// It ensures a clean state by using a new temporary file for each run.
-// Returns *client.Client instead of *client.StdioMCPClient
-func SetupPropertyTestClient(t *testing.T) (mcpClient *client.Client, ctx context.Context, cancel context.CancelFunc, cleanup func()) {
+// CreateTempStateFile creates a new unique temporary directory and an empty state file within it.
+// It returns the path to the temporary directory, the path to the state file,
+// a cleanup function to remove the directory, and an error if creation fails.
+// Each call creates a completely isolated environment.
+func CreateTempStateFile(t *testing.T) (tempDir string, stateFilePath string, cleanup func(), err error) {
 	t.Helper()
 
-	// Create a temporary directory for test files
-	tempDir, err := os.MkdirTemp("", "flashcards-prop-test-*")
+	// Create a new unique temporary directory for this specific SUT instance.
+	// The pattern includes the test name for easier identification, but uniqueness
+	// is guaranteed by os.MkdirTemp.
+	// safeTestName := strings.ReplaceAll(t.Name(), "/", "_") // Keep for logging if needed, but not strictly necessary for MkdirTemp uniqueness
+	tempDir, err = os.MkdirTemp("", "flashcards-sut-state-*")
 	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
+		return "", "", nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
-	// Use a fixed filename in the temp dir
-	tempFilePath := filepath.Join(tempDir, "flashcards-test.json")
+	// Define the state file path within the unique temp directory.
+	stateFilePath = filepath.Join(tempDir, "flashcards-test.json")
 
-	// Initialize with an empty JSON object
-	err = os.WriteFile(tempFilePath, []byte("{}"), 0644)
+	// Initialize the state file with an empty JSON object.
+	err = os.WriteFile(stateFilePath, []byte("{}"), 0644)
 	if err != nil {
-		os.RemoveAll(tempDir) // Clean up if initialization fails
-		t.Fatalf("Failed to initialize temp file: %v", err)
+		os.RemoveAll(tempDir) // Clean up the directory if file creation fails
+		return "", "", nil, fmt.Errorf("failed to initialize state file %s: %w", stateFilePath, err)
 	}
 
-	// Create cleanup function to remove the temp directory
+	t.Logf("Created unique state file for SUT instance in test %s at %s (within %s)", t.Name(), stateFilePath, tempDir)
+
+	// Define the cleanup function specific to this temporary directory.
 	cleanup = func() {
-		os.RemoveAll(tempDir)
+		t.Logf("Cleaning up temp directory for SUT instance: %s", tempDir)
+		err := os.RemoveAll(tempDir)
+		if err != nil {
+			// Log the error but don't fail the test, as cleanup failure
+			// might happen after the test itself has passed/failed.
+			t.Logf("Warning: failed to remove temp directory %s: %v", tempDir, err)
+		}
+	}
+
+	return tempDir, stateFilePath, cleanup, nil
+}
+
+// SetupPropertyTestClient sets up an MCP client using a specific data file path.
+// The caller is responsible for managing the lifecycle of the temp file via the cleanup function.
+func SetupPropertyTestClient(t *testing.T, stateFilePath string) (mcpClient *client.Client, ctx context.Context, cancel context.CancelFunc, err error) {
+	t.Helper()
+
+	// Ensure the state file exists (it should have been created by CreateTempStateFile)
+	// Declare statErr here
+	var statErr error
+	_, statErr = os.Stat(stateFilePath)
+	if os.IsNotExist(statErr) {
+		// This indicates a programming error - CreateTempStateFile should always be called first.
+		return nil, nil, nil, fmt.Errorf("SetupPropertyTestClient called with non-existent file: %s", stateFilePath)
+	} else if statErr != nil {
+		return nil, nil, nil, fmt.Errorf("error checking state file %s: %w", stateFilePath, statErr)
 	}
 
 	// Get working directory and binary path
 	wd, err := os.Getwd()
 	if err != nil {
-		cleanup()
-		t.Fatalf("Failed to get current directory: %v", err)
+		return nil, nil, nil, fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	// Move up to the flashcards directory if we're in the propertytest directory
+	// Move up to the project root directory if we're in the propertytest directory
 	if filepath.Base(wd) == "propertytest" {
 		wd = filepath.Dir(wd)
 	}
 
 	// Determine if we need to build the binary first
-	binPath := filepath.Join(wd, "flashcards")
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		// Build the binary
-		buildCmd := exec.Command("go", "build", "-o", binPath)
-		buildCmd.Dir = wd // Set working directory for the build command
-		buildOutput, err := buildCmd.CombinedOutput()
-		if err != nil {
-			cleanup()
-			t.Fatalf("Failed to build flashcards binary: %v\nOutput: %s", err, buildOutput)
+	binPath := filepath.Join(wd, "flashcards") // Assumes binary is in the root
+	_, statErr = os.Stat(binPath)
+	shouldBuild := os.IsNotExist(statErr)
+
+	// If the binary doesn't exist OR if the Makefile exists and is newer than the binary
+	makefileInfo, makefileStatErr := os.Stat(filepath.Join(wd, "Makefile"))
+	if !shouldBuild && makefileStatErr == nil {
+		binaryInfo, binStatErr := os.Stat(binPath)
+		if binStatErr == nil && makefileInfo.ModTime().After(binaryInfo.ModTime()) {
+			t.Logf("Makefile is newer than binary, rebuilding...")
+			shouldBuild = true
 		}
+	}
+
+	if shouldBuild {
+		// Build the binary if it doesn't exist or needs rebuilding
+		t.Logf("Building flashcards binary at %s", binPath)
+		// Use 'make build' if Makefile exists, otherwise 'go build'
+		var buildCmd *exec.Cmd
+		if makefileStatErr == nil {
+			buildCmd = exec.Command("make", "build")
+			buildCmd.Dir = wd // Run make from the project root
+		} else {
+			buildCmd = exec.Command("go", "build", "-o", binPath, filepath.Join("cmd", "flashcards"))
+			buildCmd.Dir = wd // Run go build from the project root
+		}
+
+		buildOutput, buildErr := buildCmd.CombinedOutput()
+		if buildErr != nil {
+			// Return error instead of calling t.Fatalf
+			return nil, nil, nil, fmt.Errorf("failed to build flashcards binary: %v\nOutput: %s", buildErr, buildOutput)
+		}
+		t.Logf("Successfully built flashcards binary.")
 	}
 
 	// Create the MCP client targeting the server binary with the specific temp file
 	mcpClient, err = client.NewStdioMCPClient(
-		binPath,    // Use the binary directly rather than "go run ."
-		[]string{}, // Empty ENV
+		binPath, // Use the binary directly
+		[]string{"PYTHONUNBUFFERED=1", "GODEBUG=asyncpreemptoff=1"}, // Force unbuffered IO
 		"-file",
-		tempFilePath,
+		stateFilePath, // Use the provided state file path
 	)
 	if err != nil {
-		cleanup() // Run cleanup if client creation fails
-		t.Fatalf("Failed to create client: %v", err)
+		// Return error instead of calling t.Fatalf
+		return nil, nil, nil, fmt.Errorf("failed to create client with file %s: %w", stateFilePath, err)
 	}
 
 	// Create context with timeout
-	ctx, cancel = context.WithTimeout(context.Background(), 120*time.Second) // Increased timeout from 30s to 120s
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 
 	// Initialize the client
 	initRequest := mcp.InitializeRequest{}
@@ -92,15 +146,15 @@ func SetupPropertyTestClient(t *testing.T) (mcpClient *client.Client, ctx contex
 		Version: "0.1.0",
 	}
 
-	_, err = mcpClient.Initialize(ctx, initRequest)
-	if err != nil {
-		mcpClient.Close()
-		cancel()
-		cleanup()
-		t.Fatalf("Failed to initialize MCP client: %v", err)
+	_, initErr := mcpClient.Initialize(ctx, initRequest)
+	if initErr != nil {
+		mcpClient.Close() // Close the client if initialization fails
+		cancel()          // Cancel the context
+		// Return error instead of calling t.Fatalf
+		return nil, nil, nil, fmt.Errorf("failed to initialize MCP client with file %s: %w", stateFilePath, initErr)
 	}
 
-	return mcpClient, ctx, cancel, cleanup
+	return mcpClient, ctx, cancel, nil // Return nil error on success
 }
 
 // --- Generators ---
@@ -169,6 +223,8 @@ func InterfaceSlice(strings []string) []interface{} {
 }
 
 // BuildBinary ensures the flashcards binary is built and returns its path
+// This function is DEPRECATED, building is now handled within SetupPropertyTestClient.
+// Keeping it temporarily for reference or potential reuse if needed outside Setup.
 func BuildBinary(t *testing.T) string {
 	t.Helper()
 

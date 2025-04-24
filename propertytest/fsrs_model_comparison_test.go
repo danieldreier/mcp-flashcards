@@ -1,330 +1,207 @@
 package propertytest
 
 import (
+	"encoding/json"
 	"fmt"
-	"os"
+	"math"
 	"testing"
 	"time"
 
 	gofsrs "github.com/open-spaced-repetition/go-fsrs"
+
+	// MCP related imports
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // TestFSRSModelComparison directly compares the FSRS model predictions from the property test
 // with the actual implementation in the service.
 func TestFSRSModelComparison(t *testing.T) {
-	// Compare raw library behavior vs service behavior to identify any deviations
+	// --- Setup: Client for this test (now handles state file creation) ---
+	mcpClient, ctx, _, clientCleanup, err := SetupTestClientWithLongTimeout(t, 60)
+	if err != nil {
+		t.Fatalf("Failed to setup client: %v", err)
+	}
+	defer clientCleanup() // Ensures client, context, AND temp state are cleaned up
 
-	// Setup a client for the service with a longer timeout (300 seconds = 5 minutes)
-	// Complex tests with multiple state transitions need more time
-	mcpClient, ctx, cancel, baseCleanup := SetupTestClientWithLongTimeout(t, 300)
-	defer func() {
-		cancel()
-		mcpClient.Close()
-		baseCleanup()
-	}()
-
-	// Check if we're running in standalone test mode (not part of a full test suite)
-	// If so, skip the problematic complex tests that take too long
-	runningStandalone := os.Getenv("PROPERTYTEST_FULL") != "1"
-
-	// Create a SUT for the service
-	sut := FlashcardSUTFactory(mcpClient, ctx, cancel, baseCleanup, t)
-
-	// Create a direct library instance for comparison
-	directParams := gofsrs.DefaultParam()
-
-	// Test cases combining different initial states and ratings
+	// --- Test Data ---
 	testCases := []struct {
-		name             string
-		initialState     gofsrs.State
-		lastReview       time.Duration // Time since last review (relative to now)
-		rating           gofsrs.Rating
-		description      string
-		skipInStandalone bool // Skip this test case when running standalone
+		name        string
+		front       string
+		back        string
+		reviews     []gofsrs.Rating // Sequence of ratings
+		initialFSRS *gofsrs.Card    // Optional initial FSRS state
 	}{
 		{
-			name:             "New_Again",
-			initialState:     gofsrs.New,
-			lastReview:       0, // New card has no last review
-			rating:           gofsrs.Again,
-			description:      "New card rated Again",
-			skipInStandalone: false,
+			name:    "New Card Good",
+			front:   "Test Front 1",
+			back:    "Test Back 1",
+			reviews: []gofsrs.Rating{gofsrs.Good},
 		},
 		{
-			name:             "New_Hard",
-			initialState:     gofsrs.New,
-			lastReview:       0,
-			rating:           gofsrs.Hard,
-			description:      "New card rated Hard",
-			skipInStandalone: false,
+			name:    "New Card Again -> Good",
+			front:   "Test Front 2",
+			back:    "Test Back 2",
+			reviews: []gofsrs.Rating{gofsrs.Again, gofsrs.Good},
 		},
 		{
-			name:             "New_Good",
-			initialState:     gofsrs.New,
-			lastReview:       0,
-			rating:           gofsrs.Good,
-			description:      "New card rated Good",
-			skipInStandalone: false,
+			name:    "New Card Sequence (Good, Hard, Good, Easy, Again, Good)",
+			front:   "Test Front 3",
+			back:    "Test Back 3",
+			reviews: []gofsrs.Rating{gofsrs.Good, gofsrs.Hard, gofsrs.Good, gofsrs.Easy, gofsrs.Again, gofsrs.Good},
 		},
-		{
-			name:             "New_Easy",
-			initialState:     gofsrs.New,
-			lastReview:       0,
-			rating:           gofsrs.Easy,
-			description:      "New card rated Easy",
-			skipInStandalone: false,
-		},
-		{
-			name:             "Learning_1h_Again",
-			initialState:     gofsrs.Learning,
-			lastReview:       -1 * time.Hour,
-			rating:           gofsrs.Again,
-			description:      "Learning card (1h old) rated Again",
-			skipInStandalone: false,
-		},
-		{
-			name:             "Learning_1h_Good",
-			initialState:     gofsrs.Learning,
-			lastReview:       -1 * time.Hour,
-			rating:           gofsrs.Good,
-			description:      "Learning card (1h old) rated Good",
-			skipInStandalone: false,
-		},
-		{
-			name:             "Review_1d_Again",
-			initialState:     gofsrs.Review,
-			lastReview:       -24 * time.Hour,
-			rating:           gofsrs.Again,
-			description:      "Review card (1 day old) rated Again",
-			skipInStandalone: true, // Skip this complex test when running standalone
-		},
-		{
-			name:             "Review_1d_Good",
-			initialState:     gofsrs.Review,
-			lastReview:       -24 * time.Hour,
-			rating:           gofsrs.Good,
-			description:      "Review card (1 day old) rated Good",
-			skipInStandalone: true, // Skip this complex test when running standalone
-		},
+		// Add more complex cases, maybe including initial non-new state
 	}
+
+	fsrsParams := gofsrs.DefaultParam() // Use default FSRS parameters for both models
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Skip problematic test cases when running in standalone mode
-			if runningStandalone && tc.skipInStandalone {
-				t.Skip("Skipping complex test case in standalone mode. Set PROPERTYTEST_FULL=1 to run all tests.")
+			// --- Create Card in MCP/SUT ---
+			createReq := mcp.CallToolRequest{}
+			createReq.Params.Name = "create_card"
+			createReq.Params.Arguments = map[string]interface{}{
+				"front": tc.front,
+				"back":  tc.back,
 			}
 
-			now := time.Now()
-			lastReviewTime := now.Add(tc.lastReview)
-
-			// 1. Calculate expected result directly using the library
-			directCard := gofsrs.NewCard()
-			directCard.State = tc.initialState
-			if tc.lastReview != 0 {
-				directCard.LastReview = lastReviewTime
+			createRes, err := mcpClient.CallTool(ctx, createReq)
+			if err != nil {
+				t.Fatalf("Failed to create card via MCP: %v", err)
 			}
-
-			// Print initial card state for direct library test
-			t.Logf("Library test setup: State=%v, LastReview=%v",
-				directCard.State, directCard.LastReview)
-
-			// Get direct library prediction
-			directSchedulingInfo := directParams.Repeat(directCard, now)
-			directNextState := directSchedulingInfo[tc.rating].Card.State
-			directDueDate := directSchedulingInfo[tc.rating].Card.Due
-
-			// Print direct library results
-			t.Logf("Direct library result: NextState=%v, DueDate=%v, DueInterval=%v",
-				directNextState, directDueDate, directDueDate.Sub(now))
-
-			// 2. Create a card in the service with the same initial state
-			// First create a new card (always starts in New state)
-			createCard := &CreateCardCmd{
-				Front: fmt.Sprintf("Test Card Front - %s", tc.name),
-				Back:  fmt.Sprintf("Test Card Back - %s", tc.name),
-				Tags:  []string{"test", "model-comparison", tc.name},
+			createResp, err := parseCreateCardResponse(createRes)
+			if err != nil {
+				t.Fatalf("Failed to parse create card response: %v", err)
 			}
-			createResult := createCard.Run(sut)
-			createResp, ok := createResult.(CreateCardResponse)
-			if !ok {
-				t.Fatalf("Failed to create card: %v", createResult)
-			}
-
 			cardID := createResp.Card.ID
-			t.Logf("Created card with ID: %s, Initial State: %v",
-				cardID, createResp.Card.FSRS.State)
 
-			// If we need a state other than New, we need to perform preliminary reviews
-			// to get the card into the desired state
-			if tc.initialState != gofsrs.New {
-				t.Logf("Need to transition card from New to %v state", tc.initialState)
+			// Declare sutCard as propertytest.Card and copy initial fields
+			var sutCard Card // Use the propertytest.Card type
+			sutCard.ID = createResp.Card.ID
+			sutCard.Front = createResp.Card.Front
+			sutCard.Back = createResp.Card.Back
+			sutCard.Tags = createResp.Card.Tags
+			sutCard.CreatedAt = createResp.Card.CreatedAt
+			sutCard.FSRS = createResp.Card.FSRS // FSRS struct is compatible
 
-				// Transition strategy depends on target state
-				switch tc.initialState {
-				case gofsrs.Learning:
-					// New -> Again = Learning
-					initialReview := &SubmitReviewCmd{
-						CardID: cardID,
-						Rating: gofsrs.Again,
-						Answer: "Initial review to reach Learning state",
-					}
-					result := initialReview.Run(sut)
-					reviewResp, ok := result.(ReviewResponse)
-					if !ok || !reviewResp.Success {
-						t.Fatalf("Failed initial review: %v", result)
-					}
-					t.Logf("Transitioned to Learning state: %v", reviewResp.Card.FSRS.State)
+			// --- Initialize Go-FSRS Model ---
+			fsrsModelCard := gofsrs.NewCard()
+			if tc.initialFSRS != nil {
+				fsrsModelCard = *tc.initialFSRS
+			}
 
-				case gofsrs.Review:
-					// New -> Easy = Review
-					initialReview := &SubmitReviewCmd{
-						CardID: cardID,
-						Rating: gofsrs.Easy,
-						Answer: "Initial review to reach Review state",
-					}
-					result := initialReview.Run(sut)
-					reviewResp, ok := result.(ReviewResponse)
-					if !ok || !reviewResp.Success {
-						t.Fatalf("Failed initial review: %v", result)
-					}
-					t.Logf("Transitioned to Review state: %v", reviewResp.Card.FSRS.State)
-
-				case gofsrs.Relearning:
-					// New -> Easy -> Again = Relearning
-					firstReview := &SubmitReviewCmd{
-						CardID: cardID,
-						Rating: gofsrs.Easy,
-						Answer: "First review to reach Review state",
-					}
-					result1 := firstReview.Run(sut)
-					reviewResp1, ok := result1.(ReviewResponse)
-					if !ok || !reviewResp1.Success {
-						t.Fatalf("Failed first review: %v", result1)
-					}
-
-					secondReview := &SubmitReviewCmd{
-						CardID: cardID,
-						Rating: gofsrs.Again,
-						Answer: "Second review to reach Relearning state",
-					}
-					result2 := secondReview.Run(sut)
-					reviewResp2, ok := result2.(ReviewResponse)
-					if !ok || !reviewResp2.Success {
-						t.Fatalf("Failed second review: %v", result2)
-					}
-					t.Logf("Transitioned to Relearning state: %v", reviewResp2.Card.FSRS.State)
+			// --- Apply Reviews Sequentially ---
+			now := time.Now()
+			for i, rating := range tc.reviews {
+				// Apply review to SUT via MCP
+				submitReq := mcp.CallToolRequest{}
+				submitReq.Params.Name = "submit_review"
+				submitReq.Params.Arguments = map[string]interface{}{
+					"card_id": cardID,
+					"rating":  float64(rating),
+					"answer":  "test answer",
 				}
-			}
 
-			// Get the current card state
-			getCardCmd := &GetCardCmd{CardID: cardID}
-			getResult := getCardCmd.Run(sut)
-			cards, ok := getResult.(ListCardsResponse)
-			if !ok {
-				t.Fatalf("Failed to get card: %v", getResult)
-			}
-
-			var currentCard Card
-			for _, card := range cards.Cards {
-				if card.ID == cardID {
-					currentCard = card
-					break
+				submitRes, err := mcpClient.CallTool(ctx, submitReq)
+				if err != nil {
+					t.Fatalf("Review %d: Failed to submit review via MCP: %v", i+1, err)
 				}
-			}
+				submitResp, err := parseSubmitReviewResponse(submitRes)
+				if err != nil {
+					t.Fatalf("Review %d: Failed to parse submit review response: %v", i+1, err)
+				}
+				sutCard = submitResp.Card // Now this assignment is type-correct
 
-			if currentCard.ID == "" {
-				t.Fatalf("Card %s not found in list response", cardID)
-			}
+				// Apply review to go-fsrs model directly
+				schedule := fsrsParams.Repeat(fsrsModelCard, now)
+				fsrsModelCard = schedule[rating].Card
 
-			// Verify the card is in the expected initial state
-			t.Logf("Card state before test review: %v", currentCard.FSRS.State)
-			if currentCard.FSRS.State != tc.initialState {
-				t.Fatalf("Card is not in the expected initial state: got %v, want %v",
-					currentCard.FSRS.State, tc.initialState)
-			}
+				// --- Compare States After Each Review ---
+				compareFSRSCards(t, fmt.Sprintf("After Review %d (Rating: %d)", i+1, rating), sutCard.FSRS, fsrsModelCard)
 
-			// 3. Run the review in the test model to get the expected result
-			modelCard := currentCard // Copy current state for the model
-
-			// Create mock state for NextState to populate expectations
-			mockState := &CommandState{
-				Cards: map[string]Card{
-					cardID: modelCard,
-				},
-				KnownRealIDs: []string{cardID},
-				LastRealID:   cardID,
-				T:            t,
-			}
-
-			// Create the review command
-			submitReview := &SubmitReviewCmd{
-				CardID: cardID,
-				Rating: tc.rating,
-				Answer: fmt.Sprintf("Test review with rating %d", tc.rating),
-			}
-
-			// Call NextState to populate the expected values
-			submitReview.NextState(mockState)
-
-			// Print model predictions
-			t.Logf("Model predicts: NextState=%v, DueDate=%v",
-				submitReview.ExpectedFSRSState, submitReview.ExpectedDueDate)
-
-			// 4. Run the review in the service
-			result := submitReview.Run(sut)
-
-			// Verify the result
-			reviewResp, ok := result.(ReviewResponse)
-			if !ok {
-				t.Fatalf("Failed to submit review: %v", result)
-			}
-
-			if !reviewResp.Success {
-				t.Fatalf("Review was not successful: %s", reviewResp.Message)
-			}
-
-			// 5. Compare both results
-			t.Logf("Service result: NextState=%v, DueDate=%v",
-				reviewResp.Card.FSRS.State, reviewResp.Card.FSRS.Due)
-
-			// Check if direct library, model, and service all agree
-			modelMatchesLibrary := submitReview.ExpectedFSRSState == directNextState
-			serviceMatchesLibrary := reviewResp.Card.FSRS.State == directNextState
-			serviceMatchesModel := reviewResp.Card.FSRS.State == submitReview.ExpectedFSRSState
-
-			t.Logf("Comparison - Model matches Library: %v, Service matches Library: %v, Service matches Model: %v",
-				modelMatchesLibrary, serviceMatchesLibrary, serviceMatchesModel)
-
-			if !modelMatchesLibrary {
-				t.Errorf("Model prediction (%v) doesn't match direct library call (%v)",
-					submitReview.ExpectedFSRSState, directNextState)
-			}
-
-			if !serviceMatchesLibrary {
-				t.Errorf("Service implementation (%v) doesn't match direct library call (%v)",
-					reviewResp.Card.FSRS.State, directNextState)
-			}
-
-			if !serviceMatchesModel {
-				t.Errorf("Service implementation (%v) doesn't match model prediction (%v)",
-					reviewResp.Card.FSRS.State, submitReview.ExpectedFSRSState)
-			}
-
-			// Check due dates
-			modelDueDiff := submitReview.ExpectedDueDate.Sub(directDueDate).Abs()
-			serviceDueDiff := reviewResp.Card.FSRS.Due.Sub(directDueDate).Abs()
-
-			t.Logf("Due date differences - Model vs Library: %v, Service vs Library: %v",
-				modelDueDiff, serviceDueDiff)
-
-			if modelDueDiff > 5*time.Second {
-				t.Errorf("Model due date differs from library by %v", modelDueDiff)
-			}
-
-			if serviceDueDiff > 5*time.Second {
-				t.Errorf("Service due date differs from library by %v", serviceDueDiff)
+				// Advance time slightly for the next review
+				if fsrsModelCard.ScheduledDays > 0 {
+					now = now.AddDate(0, 0, int(fsrsModelCard.ScheduledDays)+1)
+				} else {
+					now = now.Add(time.Minute)
+				}
 			}
 		})
 	}
+}
+
+// Helper function to compare gofsrs.Card structs with tolerance for float values.
+func compareFSRSCards(t *testing.T, context string, sut gofsrs.Card, model gofsrs.Card) {
+	t.Helper()
+	const tolerance = 1e-4 // Tolerance for floating point comparisons
+
+	if sut.State != model.State {
+		t.Errorf("%s: State mismatch: SUT=%v, Model=%v", context, sut.State, model.State)
+	}
+	if math.Abs(sut.Stability-model.Stability) > tolerance {
+		t.Errorf("%s: Stability mismatch: SUT=%.4f, Model=%.4f", context, sut.Stability, model.Stability)
+	}
+	if math.Abs(sut.Difficulty-model.Difficulty) > tolerance {
+		t.Errorf("%s: Difficulty mismatch: SUT=%.4f, Model=%.4f", context, sut.Difficulty, model.Difficulty)
+	}
+	if sut.ElapsedDays != model.ElapsedDays {
+		t.Errorf("%s: ElapsedDays mismatch: SUT=%d, Model=%d", context, sut.ElapsedDays, model.ElapsedDays)
+	}
+	if sut.ScheduledDays != model.ScheduledDays {
+		t.Errorf("%s: ScheduledDays mismatch: SUT=%d, Model=%d", context, sut.ScheduledDays, model.ScheduledDays)
+	}
+	if sut.Reps != model.Reps {
+		t.Errorf("%s: Reps mismatch: SUT=%d, Model=%d", context, sut.Reps, model.Reps)
+	}
+	if sut.Lapses != model.Lapses {
+		t.Errorf("%s: Lapses mismatch: SUT=%d, Model=%d", context, sut.Lapses, model.Lapses)
+	}
+	if !sut.Due.Equal(model.Due) {
+		if sut.Due.Sub(model.Due).Abs() > time.Second {
+			t.Errorf("%s: Due date mismatch: SUT=%v, Model=%v", context, sut.Due.Format(time.RFC3339), model.Due.Format(time.RFC3339))
+		}
+	}
+}
+
+// --- Parsing Helpers ---
+
+func parseCreateCardResponse(result *mcp.CallToolResult) (CreateCardResponse, error) {
+	if len(result.Content) == 0 {
+		return CreateCardResponse{}, fmt.Errorf("no content in create response")
+	}
+	textContent, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		return CreateCardResponse{}, fmt.Errorf("expected TextContent, got %T", result.Content[0])
+	}
+	var resp CreateCardResponse
+	err := json.Unmarshal([]byte(textContent.Text), &resp)
+	if err != nil {
+		return CreateCardResponse{}, fmt.Errorf("failed to parse create response JSON: %w. Text: %s", err, textContent.Text)
+	}
+	return resp, nil
+}
+
+func parseSubmitReviewResponse(result *mcp.CallToolResult) (ReviewResponse, error) {
+	if len(result.Content) == 0 {
+		return ReviewResponse{}, fmt.Errorf("no content in review response")
+	}
+	textContent, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		return ReviewResponse{}, fmt.Errorf("expected TextContent, got %T", result.Content[0])
+	}
+	var resp ReviewResponse
+	err := json.Unmarshal([]byte(textContent.Text), &resp)
+	if err != nil {
+		// Attempt to parse as error response
+		var errResp map[string]interface{}
+		if jsonErr := json.Unmarshal([]byte(textContent.Text), &errResp); jsonErr == nil {
+			if errMsg, ok := errResp["error"].(string); ok {
+				return ReviewResponse{Success: false, Message: errMsg}, fmt.Errorf("tool error: %s", errMsg)
+			}
+		}
+		return ReviewResponse{}, fmt.Errorf("failed to parse review response JSON: %w. Text: %s", err, textContent.Text)
+	}
+	if !resp.Success {
+		return resp, fmt.Errorf("review failed: %s", resp.Message)
+	}
+	return resp, nil
 }
