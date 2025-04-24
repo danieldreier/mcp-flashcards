@@ -70,7 +70,8 @@ func callManageDueDatesClient(c *client.Client, ctx context.Context, t *testing.
 		if unmarshalErr2 := json.Unmarshal([]byte(textContent), &msgData); unmarshalErr2 == nil {
 			return map[string]interface{}{"message": msgData.Message}, nil
 		}
-		return nil, fmt.Errorf("failed to unmarshal result JSON '%s': %w", textContent, unmarshalErr)
+		const errFmt = "failed to unmarshal result JSON '%s': %w"
+		return nil, fmt.Errorf(errFmt, textContent, unmarshalErr)
 	}
 	return data, nil
 }
@@ -111,7 +112,8 @@ func callCreateCardClient(c *client.Client, ctx context.Context, t *testing.T, p
 
 	var data map[string]interface{}
 	if unmarshalErr := json.Unmarshal([]byte(textContent), &data); unmarshalErr != nil {
-		return nil, fmt.Errorf("failed to unmarshal result JSON '%s': %w", textContent, unmarshalErr)
+		const errFmt = "failed to unmarshal result JSON '%s': %w"
+		return nil, fmt.Errorf(errFmt, textContent, unmarshalErr)
 	}
 	if cardData, ok := data["card"].(map[string]interface{}); ok {
 		return cardData, nil
@@ -155,7 +157,8 @@ func callSubmitReviewClient(c *client.Client, ctx context.Context, t *testing.T,
 
 	var data map[string]interface{}
 	if unmarshalErr := json.Unmarshal([]byte(textContent), &data); unmarshalErr != nil {
-		return nil, fmt.Errorf("failed to unmarshal result JSON '%s': %w", textContent, unmarshalErr)
+		const errFmt = "failed to unmarshal result JSON '%s': %w"
+		return nil, fmt.Errorf(errFmt, textContent, unmarshalErr)
 	}
 	return data, nil
 }
@@ -222,7 +225,8 @@ func readDueDateProgressClient(c *client.Client, ctx context.Context, t *testing
 	var progressInfos []DueDateProgressInfo
 	if unmarshalErr := json.Unmarshal([]byte(textContent.Text), &progressInfos); unmarshalErr != nil {
 		t.Logf("JSON unmarshal error: %v", unmarshalErr)
-		return nil, fmt.Errorf("failed to unmarshal progress JSON '%s': %w", textContent.Text, unmarshalErr)
+		const errFmt = "failed to unmarshal progress JSON '%s': %w"
+		return nil, fmt.Errorf(errFmt, textContent.Text, unmarshalErr)
 	}
 
 	t.Logf("Unmarshaled progress info count: %d", len(progressInfos))
@@ -893,7 +897,8 @@ func createInitialCards(c *client.Client, ctx context.Context) ([]string, error)
 					}
 				} else {
 					// Log or handle JSON unmarshal error for list response
-					return nil, fmt.Errorf("failed to unmarshal list response for '%s': %w", data.front, err)
+					const errFmt = "failed to unmarshal list response for '%s': %w"
+					return nil, fmt.Errorf(errFmt, data.front, err)
 				}
 			}
 		}
@@ -949,7 +954,7 @@ func getDueCardCall(t *testing.T, c *client.Client, ctx context.Context) (Card, 
 		}
 		if jsonErr := json.Unmarshal([]byte(txt.Text), &errResp); jsonErr == nil && errResp.Error != "" {
 			t.Logf("Original JSON parse error (ignored): %v", err)
-			return Card{}, errResp.Stats, fmt.Errorf(errResp.Error)
+			return Card{}, errResp.Stats, fmt.Errorf("%s", errResp.Error)
 		}
 		return Card{}, CardStats{}, fmt.Errorf("failed unmarshal CardResponse: %w. Text: %s", err, txt.Text)
 	}
@@ -976,7 +981,9 @@ func submitReviewCall(t *testing.T, c *client.Client, ctx context.Context, cardI
 	var reviewResp ReviewResponse
 	// Use = to assign to existing err
 	if err = json.Unmarshal([]byte(txt.Text), &reviewResp); err != nil {
-		return Card{}, fmt.Errorf("failed unmarshal ReviewResponse: %w. Text: %s", err, txt.Text)
+		// Fixed: Use a constant format string
+		const errFmt = "failed unmarshal ReviewResponse: %w. Text: %s"
+		return Card{}, fmt.Errorf(errFmt, err, txt.Text)
 	}
 	if !reviewResp.Success {
 		return Card{}, fmt.Errorf("review submission failed: %s", reviewResp.Message)
@@ -1004,7 +1011,9 @@ func listCardsCall(t *testing.T, c *client.Client, ctx context.Context) ([]Card,
 	var listResp ListCardsResponse
 	// Use = to assign to existing err
 	if err = json.Unmarshal([]byte(txt.Text), &listResp); err != nil {
-		return nil, CardStats{}, fmt.Errorf("failed unmarshal ListCardsResponse: %w. Text: %s", err, txt.Text)
+		// Fixed: Use a constant format string
+		const errFmt = "failed unmarshal ListCardsResponse: %w. Text: %s"
+		return nil, CardStats{}, fmt.Errorf(errFmt, err, txt.Text)
 	}
 	return listResp.Cards, listResp.Stats, nil
 }

@@ -6,7 +6,6 @@ import (
 	"github.com/leanovate/gopter"
 	gopterCmds "github.com/leanovate/gopter/commands" // Renamed import
 	"github.com/leanovate/gopter/gen"
-	gofsrs "github.com/open-spaced-repetition/go-fsrs"
 )
 
 // TestCommandSequences verifies the consistency of the system through random command sequences.
@@ -145,102 +144,4 @@ func TestCommandSequences(t *testing.T) {
 	properties.Property("command sequences preserve consistency", gopterCmds.Prop(flashcardProtoCommands))
 
 	properties.TestingRun(t)
-}
-
-// --- Generator Helpers ---
-
-// generateCreateCardCmd generates a CreateCardCmd.
-func generateCreateCardCmd() gopter.Gen {
-	return gopter.CombineGens(
-		GenNonEmptyString(50), // Front
-		GenNonEmptyString(50), // Back
-		GenTags(5, 15),        // Tags
-	).Map(func(values []interface{}) gopterCmds.Command {
-		return &CreateCardCmd{
-			Front: values[0].(string),
-			Back:  values[1].(string),
-			Tags:  values[2].([]string),
-		}
-	}).WithShrinker(gopter.NoShrinker)
-}
-
-// generateIdBasedCmd generates a command that requires an existing card ID.
-func generateIdBasedCmd(state *CommandState) gopter.Gen {
-	if len(state.KnownRealIDs) == 0 {
-		// Should not happen due to check in commandGen, but return nil gen if it does
-		return nil
-	}
-	return gen.OneGenOf(
-		// GetCardCmd
-		gen.Const(state.KnownRealIDs).Map(func(ids []string) gopterCmds.Command {
-			sample, _ := gen.IntRange(0, len(ids)-1).Sample()
-			return &GetCardCmd{CardID: ids[sample.(int)]}
-		}),
-		// DeleteCardCmd
-		gen.Const(state.KnownRealIDs).Map(func(ids []string) gopterCmds.Command {
-			sample, _ := gen.IntRange(0, len(ids)-1).Sample()
-			return &DeleteCardCmd{CardID: ids[sample.(int)]}
-		}),
-		// SubmitReviewCmd
-		gopter.CombineGens(
-			gen.Const(state.KnownRealIDs).Map(func(ids []string) string {
-				sample, _ := gen.IntRange(0, len(ids)-1).Sample()
-				return ids[sample.(int)]
-			}),
-			GenRating(),
-			GenNonEmptyString(30),
-		).Map(func(values []interface{}) gopterCmds.Command {
-			return &SubmitReviewCmd{
-				CardID: values[0].(string),
-				Rating: values[1].(gofsrs.Rating),
-				Answer: values[2].(string),
-			}
-		}),
-	)
-}
-
-// generateUpdateCardCmd generates an UpdateCardCmd.
-func generateUpdateCardCmd(state *CommandState) gopter.Gen {
-	if len(state.KnownRealIDs) == 0 {
-		// Should not happen due to check in commandGen, but return nil gen if it does
-		return nil
-	}
-	return gopter.CombineGens(
-		gen.Const(state.KnownRealIDs).Map(func(ids []string) string {
-			sample, _ := gen.IntRange(0, len(ids)-1).Sample()
-			return ids[sample.(int)]
-		}),
-		GenMaybeString(50),
-		GenMaybeString(50),
-		GenMaybeTags(5, 15),
-	).Map(func(values []interface{}) gopterCmds.Command {
-		cmd := &UpdateCardCmd{
-			CardID:   values[0].(string),
-			NewFront: values[1].(*string),
-			NewBack:  values[2].(*string),
-			NewTags:  values[3].(*[]string),
-		}
-		if cmd.NewFront == nil && cmd.NewBack == nil && cmd.NewTags == nil {
-			sample, _ := gen.Bool().Sample()
-			if sample.(bool) {
-				strSample, _ := GenNonEmptyString(50).Sample()
-				str := strSample.(string)
-				cmd.NewFront = &str
-			} else {
-				strSample, _ := GenNonEmptyString(50).Sample()
-				str := strSample.(string)
-				cmd.NewBack = &str
-			}
-		}
-		return cmd
-	})
-}
-
-// generateGetDueCardCmd generates a GetDueCardCmd.
-func generateGetDueCardCmd() gopter.Gen {
-	return GenTags(3, 10).Map(func(tags []string) gopterCmds.Command {
-		return &GetDueCardCmd{
-			FilterTags: tags,
-		}
-	})
 }
