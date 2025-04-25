@@ -33,7 +33,23 @@ func TestCommandSequences(t *testing.T) {
 
 	// Use the seed to initialize test parameters
 	parameters := gopter.DefaultTestParametersWithSeed(seed)
-	parameters.MinSuccessfulTests = 30
+
+	// Handle number of tests
+	numTestsStr := os.Getenv("MCP_PROPERTY_TEST_SEQUENCES")
+	numTests := 30 // Default value
+	if numTestsStr != "" {
+		parsedNumTests, err := strconv.Atoi(numTestsStr)
+		if err != nil || parsedNumTests <= 0 {
+			t.Logf("Warning: Invalid MCP_PROPERTY_TEST_SEQUENCES '%s', using default of %d. Error: %v", numTestsStr, numTests, err)
+		} else {
+			numTests = parsedNumTests
+			t.Logf("Using MCP_PROPERTY_TEST_SEQUENCES=%d", numTests)
+		}
+	} else {
+		t.Logf("MCP_PROPERTY_TEST_SEQUENCES not set, using default of %d", numTests)
+	}
+	parameters.MinSuccessfulTests = numTests
+
 	parameters.MaxSize = 15
 	// Ensure math/rand is also seeded for any other potential uses within the test or SUT
 	// Although gopter uses its own Rng, seeding the global one is good practice.
