@@ -17,6 +17,7 @@ import (
 
 	// Corrected import path for go-fsrs
 	gofsrs "github.com/open-spaced-repetition/go-fsrs"
+	"go.uber.org/zap"
 )
 
 // --- System Under Test Definition ---
@@ -26,6 +27,7 @@ type FlashcardSUT struct {
 	Cancel             context.CancelFunc
 	tempDirCleanupFunc func() // Renamed for clarity: this cleans up the temp state directory
 	T                  *testing.T
+	Logger             *zap.Logger
 }
 
 // --- State Definition ---
@@ -65,7 +67,11 @@ type CreateCardCmd struct {
 
 func (c *CreateCardCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	fSUT := sut.(*FlashcardSUT)
-	fSUT.T.Logf("Run: %s", c.String())
+	fSUT.Logger.Debug("Run CreateCardCmd",
+		zap.String("front", c.Front),
+		zap.String("back", c.Back),
+		zap.Strings("tags", c.Tags))
+
 	createCardRequest := mcp.CallToolRequest{}
 	createCardRequest.Params.Name = "create_card"
 	createCardRequest.Params.Arguments = map[string]interface{}{
@@ -75,30 +81,40 @@ func (c *CreateCardCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	}
 	createResult, err := fSUT.Client.CallTool(fSUT.Ctx, createCardRequest)
 	if err != nil {
+		fSUT.Logger.Error("create_card Run failed", zap.Error(err))
 		return fmt.Errorf("create_card Run failed: %w", err)
 	}
 	if len(createResult.Content) == 0 {
+		fSUT.Logger.Error("create_card Run: no content returned")
 		return fmt.Errorf("create_card Run: no content returned")
 	}
 	createTextContent, ok := createResult.Content[0].(mcp.TextContent)
 	if !ok {
+		fSUT.Logger.Error("create_card Run: unexpected content type", zap.String("type", fmt.Sprintf("%T", createResult.Content[0])))
 		return fmt.Errorf("create_card Run: expected TextContent, got %T", createResult.Content[0])
 	}
+
+	fSUT.Logger.Debug("create_card response text", zap.String("text", createTextContent.Text))
+
 	var createResponse CreateCardResponse
 	err = json.Unmarshal([]byte(createTextContent.Text), &createResponse)
 	if err != nil {
 		var errResp map[string]interface{}
 		if jsonErr := json.Unmarshal([]byte(createTextContent.Text), &errResp); jsonErr == nil {
 			if errMsg, ok := errResp["error"].(string); ok {
-				fSUT.T.Logf("Original JSON parse error (ignored): %v", err)
+				fSUT.Logger.Debug("create_card tool returned error", zap.String("error", errMsg), zap.Error(err))
+				fSUT.Logger.Error("create_card Run: failed parse response", zap.Error(err), zap.String("response", createTextContent.Text))
 				return fmt.Errorf("create_card tool error: %s", errMsg)
 			}
 		}
 		return fmt.Errorf("create_card Run: failed parse response: %w. Resp: %s", err, createTextContent.Text)
 	}
 	if createResponse.Card.ID == "" {
+		fSUT.Logger.Error("create_card Run: response missing card ID", zap.String("response", createTextContent.Text))
 		return fmt.Errorf("create_card Run: response missing card ID. Resp: %s", createTextContent.Text)
 	}
+
+	fSUT.Logger.Debug("create_card successful", zap.String("card_id", createResponse.Card.ID))
 	return createResponse
 }
 
@@ -184,25 +200,34 @@ type GetCardCmd struct {
 
 func (c *GetCardCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	fSUT := sut.(*FlashcardSUT)
-	fSUT.T.Logf("Run: %s", c.String())
+	fSUT.Logger.Debug("Run GetCardCmd", zap.String("card_id", c.CardID))
+
 	listCardsRequest := mcp.CallToolRequest{}
 	listCardsRequest.Params.Name = "list_cards"
 	listResult, err := fSUT.Client.CallTool(fSUT.Ctx, listCardsRequest)
 	if err != nil {
+		fSUT.Logger.Error("list_cards Run failed", zap.Error(err))
 		return fmt.Errorf("list_cards Run failed: %w", err)
 	}
 	if len(listResult.Content) == 0 {
-		return ListCardsResponse{Cards: []Card{}}
-	} // Return empty list
+		fSUT.Logger.Debug("list_cards Run: no content returned, returning empty list")
+		return ListCardsResponse{Cards: []Card{}} // Return empty list
+	}
 	listTextContent, ok := listResult.Content[0].(mcp.TextContent)
 	if !ok {
+		fSUT.Logger.Error("list_cards Run: unexpected content type", zap.String("type", fmt.Sprintf("%T", listResult.Content[0])))
 		return fmt.Errorf("list_cards Run: expected TextContent, got %T", listResult.Content[0])
 	}
+
+	fSUT.Logger.Debug("list_cards response text", zap.String("text", listTextContent.Text))
+
 	var listResponse ListCardsResponse
 	err = json.Unmarshal([]byte(listTextContent.Text), &listResponse)
 	if err != nil {
+		fSUT.Logger.Error("list_cards Run: failed parse", zap.Error(err), zap.String("response", listTextContent.Text))
 		return fmt.Errorf("list_cards Run: failed parse: %w. Resp: %s", err, listTextContent.Text)
 	}
+	fSUT.Logger.Debug("list_cards successful", zap.Int("card_count", len(listResponse.Cards)))
 	return listResponse // Return the actual list response
 }
 
@@ -282,31 +307,40 @@ type DeleteCardCmd struct {
 
 func (c *DeleteCardCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	fSUT := sut.(*FlashcardSUT)
-	fSUT.T.Logf("Run: %s", c.String())
-	fmt.Printf("[DEBUG-TEST-DELETE] Starting DeleteCardCmd.Run for ID %s\n", c.CardID)
+	fSUT.Logger.Debug("Starting DeleteCardCmd.Run", zap.String("card_id", c.CardID))
+
 	deleteReq := mcp.CallToolRequest{}
 	deleteReq.Params.Name = "delete_card"
 	deleteReq.Params.Arguments = map[string]interface{}{"card_id": c.CardID}
-	fmt.Printf("[DEBUG-TEST-DELETE] Calling MCP client with delete_card at %v\n", time.Now())
+
+	callTime := time.Now()
+	fSUT.Logger.Debug("Calling MCP client with delete_card", zap.Time("call_time", callTime))
+
 	deleteRes, err := fSUT.Client.CallTool(fSUT.Ctx, deleteReq)
-	fmt.Printf("[DEBUG-TEST-DELETE] MCP client call completed at %v, err: %v\n", time.Now(), err)
+	completionTime := time.Now()
+	fSUT.Logger.Debug("MCP client call completed (delete_card)", zap.Time("completion_time", completionTime), zap.Error(err))
+
 	if err != nil {
+		fSUT.Logger.Error("delete_card Run failed", zap.Error(err))
 		return fmt.Errorf("delete_card Run failed: %w", err)
 	}
 	if len(deleteRes.Content) == 0 {
+		fSUT.Logger.Error("delete_card Run: no content")
 		return fmt.Errorf("delete_card Run: no content")
 	}
 	deleteTxt, ok := deleteRes.Content[0].(mcp.TextContent)
 	if !ok {
+		fSUT.Logger.Error("delete_card Run: unexpected content type", zap.String("type", fmt.Sprintf("%T", deleteRes.Content[0])))
 		return fmt.Errorf("delete_card Run: expected TextContent, got %T", deleteRes.Content[0])
 	}
-	fmt.Printf("[DEBUG-TEST-DELETE] Raw response text: %s\n", deleteTxt.Text)
+
+	fSUT.Logger.Debug("delete_card raw response text", zap.String("text", deleteTxt.Text))
 
 	// First, try to unmarshal as a success response
 	var deleteResp DeleteCardResponse
 	err = json.Unmarshal([]byte(deleteTxt.Text), &deleteResp)
 	if err == nil && deleteResp.Success {
-		fmt.Printf("[DEBUG-TEST-DELETE] Deletion successful: %v\n", deleteResp.Success)
+		fSUT.Logger.Debug("Deletion successful via DeleteCardResponse", zap.Bool("success", deleteResp.Success))
 		return deleteResp
 	}
 
@@ -314,10 +348,9 @@ func (c *DeleteCardCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	var errResp map[string]interface{}
 	if jsonErr := json.Unmarshal([]byte(deleteTxt.Text), &errResp); jsonErr == nil {
 		if errMsg, ok := errResp["error"].(string); ok && len(errMsg) > 0 {
-			fmt.Printf("[DEBUG-TEST-DELETE] Parsed error message: %s\n", errMsg)
+			fSUT.Logger.Debug("Parsed error message from delete_card response", zap.String("error", errMsg))
 			if strings.Contains(strings.ToLower(errMsg), "not found") {
-				fSUT.T.Logf("DeleteCardCmd Run: Card %s not found, returning error.", c.CardID)
-				fmt.Printf("[DEBUG-TEST-DELETE] Card not found, returning as error\n")
+				fSUT.Logger.Debug("DeleteCardCmd Run: Card not found, returning error.", zap.String("card_id", c.CardID))
 				return fmt.Errorf("delete_card tool error: %s", errMsg)
 			}
 			return fmt.Errorf("delete_card tool error: %s", errMsg)
@@ -327,11 +360,12 @@ func (c *DeleteCardCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	// If we got here and had already parsed a DeleteCardResponse (but it wasn't successful),
 	// return it so the caller can see the unsuccessful status
 	if err == nil {
-		fmt.Printf("[DEBUG-TEST-DELETE] Deletion returned success=false: %s\n", deleteResp.Message)
+		fSUT.Logger.Debug("Deletion returned success=false", zap.String("message", deleteResp.Message))
 		return deleteResp
 	}
 
 	// Last resort - couldn't parse response in any expected format
+	fSUT.Logger.Error("Failed parse delete_card JSON", zap.Error(err), zap.String("response", deleteTxt.Text))
 	return fmt.Errorf("failed parse delete_card JSON: %w. Resp: %s", err, deleteTxt.Text)
 }
 
@@ -402,7 +436,12 @@ type UpdateCardCmd struct {
 
 func (c *UpdateCardCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	fSUT := sut.(*FlashcardSUT)
-	fSUT.T.Logf("Run: %s", c.String())
+	fSUT.Logger.Debug("Run UpdateCardCmd",
+		zap.String("card_id", c.CardID),
+		zap.Any("new_front", c.NewFront),
+		zap.Any("new_back", c.NewBack),
+		zap.Any("new_tags", c.NewTags))
+
 	args := map[string]interface{}{"card_id": c.CardID}
 	if c.NewFront != nil {
 		args["front"] = *c.NewFront
@@ -414,37 +453,51 @@ func (c *UpdateCardCmd) Run(sut commands.SystemUnderTest) commands.Result {
 		args["tags"] = InterfaceSlice(*c.NewTags)
 	}
 	if len(args) <= 1 {
+		fSUT.Logger.Error("UpdateCardCmd Run: no fields provided")
 		return fmt.Errorf("UpdateCardCmd Run: no fields provided")
 	}
 	updateReq := mcp.CallToolRequest{}
 	updateReq.Params.Name = "update_card"
 	updateReq.Params.Arguments = args
+
+	fSUT.Logger.Debug("Calling update_card", zap.Any("arguments", args))
+
 	updateRes, err := fSUT.Client.CallTool(fSUT.Ctx, updateReq)
 	if err != nil {
+		fSUT.Logger.Error("update_card Run failed", zap.Error(err))
 		return fmt.Errorf("update_card Run failed: %w", err)
 	}
 	if len(updateRes.Content) == 0 {
+		fSUT.Logger.Error("update_card Run: no content")
 		return fmt.Errorf("update_card Run: no content")
 	}
 	updateTxt, ok := updateRes.Content[0].(mcp.TextContent)
 	if !ok {
+		fSUT.Logger.Error("update_card Run: unexpected content type", zap.String("type", fmt.Sprintf("%T", updateRes.Content[0])))
 		return fmt.Errorf("update_card Run: expected TextContent, got %T", updateRes.Content[0])
 	}
+
+	fSUT.Logger.Debug("update_card response text", zap.String("text", updateTxt.Text))
+
 	var updateResp UpdateCardResponse
 	err = json.Unmarshal([]byte(updateTxt.Text), &updateResp)
 	if err != nil {
 		var errResp map[string]interface{}
 		if jsonErr := json.Unmarshal([]byte(updateTxt.Text), &errResp); jsonErr == nil {
 			if errMsg, ok := errResp["error"].(string); ok {
-				fSUT.T.Logf("Original JSON parse error (ignored): %v", err)
+				fSUT.Logger.Debug("update_card tool returned error", zap.String("error", errMsg), zap.Error(err))
 				return fmt.Errorf("update_card tool error: %s", errMsg)
 			}
 		}
+		fSUT.Logger.Error("Failed parse update_card JSON", zap.Error(err), zap.String("response", updateTxt.Text))
 		return fmt.Errorf("failed parse update_card JSON: %w. Resp: %s", err, updateTxt.Text)
 	}
 	if !updateResp.Success {
+		fSUT.Logger.Warn("update_card reported failure", zap.String("message", updateResp.Message))
 		return fmt.Errorf("update_card failure: %s", updateResp.Message)
 	}
+
+	fSUT.Logger.Debug("update_card successful", zap.Bool("success", updateResp.Success))
 	// Return success, PostCondition will verify using Get
 	return updateResp
 }
@@ -581,14 +634,18 @@ type SubmitReviewCmd struct {
 
 func (c *SubmitReviewCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	fSUT := sut.(*FlashcardSUT)
-	fSUT.T.Logf("Run: %s", c.String())
+	fSUT.Logger.Debug("Run SubmitReviewCmd",
+		zap.String("card_id", c.CardID),
+		zap.Int("rating", int(c.Rating)),
+		zap.String("answer", c.Answer),
+		zap.Time("timestamp", c.Timestamp))
 
 	// Call the service through MCP
-	fSUT.T.Logf("DEBUG: Preparing to call submit_review tool with CardID=%s, Rating=%d", c.CardID, c.Rating)
+	fSUT.Logger.Debug("Preparing to call submit_review tool", zap.String("CardID", c.CardID), zap.Int("Rating", int(c.Rating)))
 
 	// Add timer to track how long the call takes
 	startTime := time.Now()
-	fSUT.T.Logf("DEBUG: Starting MCP client call at %s", startTime.Format(time.RFC3339Nano))
+	fSUT.Logger.Debug("Starting MCP client call", zap.Time("start_time", startTime))
 
 	// Check if we're using a custom timestamp for testing
 	var hasTimestamp bool
@@ -606,6 +663,7 @@ func (c *SubmitReviewCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	// Add timestamp if provided
 	if hasTimestamp {
 		args["timestamp"] = c.Timestamp.Format(time.RFC3339)
+		fSUT.Logger.Debug("Using custom timestamp", zap.Time("timestamp", c.Timestamp))
 	}
 
 	// Create and execute the request
@@ -613,29 +671,31 @@ func (c *SubmitReviewCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	req.Params.Name = "submit_review"
 	req.Params.Arguments = args
 
+	fSUT.Logger.Debug("Calling submit_review", zap.Any("arguments", args))
 	submitResult, err := fSUT.Client.CallTool(fSUT.Ctx, req)
 
 	elapsed := time.Since(startTime)
-	fSUT.T.Logf("DEBUG: MCP client call completed in %v", elapsed)
+	fSUT.Logger.Debug("MCP client call completed", zap.Duration("elapsed", elapsed), zap.Error(err))
 
 	if err != nil {
-		fSUT.T.Logf("DEBUG: Error from submit_review call: %v", err)
+		fSUT.Logger.Error("Error from submit_review call", zap.Error(err))
 		return fmt.Errorf("submit_review Run failed: %w", err)
 	}
 
-	fSUT.T.Logf("DEBUG: Got response with %d content items", len(submitResult.Content))
+	fSUT.Logger.Debug("submit_review response content items", zap.Int("count", len(submitResult.Content)))
 
 	if len(submitResult.Content) == 0 {
+		fSUT.Logger.Error("submit_review Run: no content returned")
 		return fmt.Errorf("submit_review Run: no content returned")
 	}
 
 	submitTextContent, ok := submitResult.Content[0].(mcp.TextContent)
 	if !ok {
-		fSUT.T.Logf("DEBUG: Unexpected content type: %T", submitResult.Content[0])
+		fSUT.Logger.Error("submit_review Run: unexpected content type", zap.String("type", fmt.Sprintf("%T", submitResult.Content[0])))
 		return fmt.Errorf("submit_review Run: expected TextContent, got %T", submitResult.Content[0])
 	}
 
-	fSUT.T.Logf("DEBUG: Raw response text: %s", submitTextContent.Text)
+	fSUT.Logger.Debug("submit_review raw response text", zap.String("text", submitTextContent.Text))
 
 	// --- Corrected JSON Parsing Logic ---
 	// Attempt to parse as successful ReviewResponse first
@@ -646,7 +706,7 @@ func (c *SubmitReviewCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	if err != nil || !reviewResponse.Success {
 		// If unmarshal failed, log it
 		if err != nil {
-			fSUT.T.Logf("DEBUG: JSON unmarshal into ReviewResponse failed: %v. Trying error format.", err)
+			fSUT.Logger.Debug("JSON unmarshal into ReviewResponse failed. Trying error format.", zap.Error(err))
 		}
 
 		// Attempt to parse as a generic JSON error response {"error": "..."}
@@ -654,8 +714,7 @@ func (c *SubmitReviewCmd) Run(sut commands.SystemUnderTest) commands.Result {
 		if jsonErr := json.Unmarshal([]byte(submitTextContent.Text), &errResp); jsonErr == nil {
 			if errMsg, ok := errResp["error"].(string); ok {
 				// Successfully parsed the error message from JSON
-				fSUT.T.Logf("Parsed tool error message: %s", errMsg)
-				// Return this error to the PostCondition
+				fSUT.Logger.Warn("Parsed tool error message from submit_review", zap.String("error", errMsg))
 				return fmt.Errorf("submit_review tool error: %s", errMsg)
 			}
 		}
@@ -663,17 +722,18 @@ func (c *SubmitReviewCmd) Run(sut commands.SystemUnderTest) commands.Result {
 		// If it wasn't a ReviewResponse and wasn't a standard JSON error,
 		// or if it was a ReviewResponse with Success=false, return an appropriate error.
 		if err == nil && !reviewResponse.Success { // ReviewResponse parsed but indicated failure
-			fSUT.T.Logf("DEBUG: Review unsuccessful according to response: %s", reviewResponse.Message)
+			fSUT.Logger.Warn("Review unsuccessful according to response", zap.String("message", reviewResponse.Message))
 			return fmt.Errorf("submit_review failed: %s", reviewResponse.Message)
 		} else { // Failed to parse as ReviewResponse and failed to parse as standard JSON error
-			fSUT.T.Logf("DEBUG: Failed to parse response as ReviewResponse or standard JSON error.")
+			fSUT.Logger.Error("Failed to parse response as ReviewResponse or standard JSON error", zap.Error(err), zap.String("response", submitTextContent.Text))
 			return fmt.Errorf("submit_review Run: failed to parse response: %w. Resp: %s", err, submitTextContent.Text)
 		}
 	}
 
 	// If we reach here, unmarshal into ReviewResponse succeeded AND reviewResponse.Success was true
-	fSUT.T.Logf("DEBUG: Review successful. New state: %v, Due date: %v",
-		reviewResponse.Card.FSRS.State, reviewResponse.Card.FSRS.Due)
+	fSUT.Logger.Debug("Review successful",
+		zap.Any("new_state", reviewResponse.Card.FSRS.State),
+		zap.Time("due_date", reviewResponse.Card.FSRS.Due))
 
 	return reviewResponse
 }
@@ -794,48 +854,49 @@ const (
 
 func (c *GetDueCardCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	fSUT := sut.(*FlashcardSUT)
-	fSUT.T.Logf("Run: %s", c.String())
-	fmt.Printf("[DEBUG-TEST-GETDUE] Starting GetDueCardCmd.Run with tags: %v\n", c.FilterTags)
+	fSUT.Logger.Debug("Starting GetDueCardCmd.Run", zap.Strings("tags", c.FilterTags))
 
 	// Construct the request
 	getDueReq := mcp.CallToolRequest{}
 	getDueReq.Params.Name = "get_due_card"
 	if len(c.FilterTags) > 0 {
 		getDueReq.Params.Arguments = map[string]interface{}{"tags": InterfaceSlice(c.FilterTags)}
-		fmt.Printf("[DEBUG-TEST-GETDUE] Set filter tags: %v\n", c.FilterTags)
+		fSUT.Logger.Debug("Set filter tags for get_due_card", zap.Strings("tags", c.FilterTags))
 	}
 
-	fmt.Printf("[DEBUG-TEST-GETDUE] Calling MCP client with get_due_card at %v\n", time.Now())
+	callTime := time.Now()
+	fSUT.Logger.Debug("Calling MCP client with get_due_card", zap.Time("call_time", callTime))
+
 	getDueRes, err := fSUT.Client.CallTool(fSUT.Ctx, getDueReq)
-	fmt.Printf("[DEBUG-TEST-GETDUE] MCP client call completed at %v, err: %v\n", time.Now(), err)
+	completionTime := time.Now()
+	fSUT.Logger.Debug("MCP client call completed (get_due_card)", zap.Time("completion_time", completionTime), zap.Error(err))
 
 	if err != nil {
-		fmt.Printf("[DEBUG-TEST-GETDUE] Error from MCP call: %v\n", err)
+		fSUT.Logger.Error("Error from get_due_card MCP call", zap.Error(err))
 		return fmt.Errorf("get_due_card Run failed: %w", err)
 	}
 
 	if len(getDueRes.Content) == 0 {
-		fmt.Printf("[DEBUG-TEST-GETDUE] No content returned\n")
+		fSUT.Logger.Error("get_due_card Run: no content returned")
 		return fmt.Errorf("get_due_card Run: no content")
 	}
 
 	getDueTxt, ok := getDueRes.Content[0].(mcp.TextContent)
 	if !ok {
-		fmt.Printf("[DEBUG-TEST-GETDUE] Content is not TextContent\n")
+		fSUT.Logger.Error("get_due_card Run: unexpected content type", zap.String("type", fmt.Sprintf("%T", getDueRes.Content[0])))
 		return fmt.Errorf("get_due_card Run: expected TextContent, got %T", getDueRes.Content[0])
 	}
 
-	fmt.Printf("[DEBUG-TEST-GETDUE] Raw response text: %s\n", getDueTxt.Text)
+	fSUT.Logger.Debug("get_due_card raw response text", zap.String("text", getDueTxt.Text))
 
 	// First try to parse as error response
 	var errResp map[string]interface{}
 	if jsonErr := json.Unmarshal([]byte(getDueTxt.Text), &errResp); jsonErr == nil {
 		if errMsg, ok := errResp["error"].(string); ok {
-			fmt.Printf("[DEBUG-TEST-GETDUE] Found error message in response: %s\n", errMsg)
-			// If error contains "no cards due" or "no cards found", it's expected when there are no cards due
+			fSUT.Logger.Debug("Found error message in get_due_card response", zap.String("error", errMsg))
 			if strings.Contains(strings.ToLower(errMsg), "no cards due") ||
 				strings.Contains(strings.ToLower(errMsg), "no cards found") {
-				fmt.Printf("[DEBUG-TEST-GETDUE] No cards due or no cards with tags - returning error\n")
+				fSUT.Logger.Debug("No cards due or no cards with tags - returning error")
 				return fmt.Errorf("get_due_card tool error: %s", errMsg)
 			}
 			return fmt.Errorf("get_due_card tool error: %s", errMsg)
@@ -846,17 +907,17 @@ func (c *GetDueCardCmd) Run(sut commands.SystemUnderTest) commands.Result {
 	var cardResponse CardResponse
 	err = json.Unmarshal([]byte(getDueTxt.Text), &cardResponse)
 	if err != nil {
-		fmt.Printf("[DEBUG-TEST-GETDUE] Failed to parse JSON: %v\n", err)
+		fSUT.Logger.Error("get_due_card Run: failed parse JSON", zap.Error(err), zap.String("response", getDueTxt.Text))
 		return fmt.Errorf("get_due_card Run: failed parse: %w. Resp: %s", err, getDueTxt.Text)
 	}
 
 	// Verify that we got a valid card ID
 	if cardResponse.Card.ID == "" {
-		fmt.Printf("[DEBUG-TEST-GETDUE] Parsed response but card ID is empty\n")
+		fSUT.Logger.Error("get_due_card: Parsed response but card ID is empty", zap.String("response", getDueTxt.Text))
 		return fmt.Errorf("get_due_card tool error: No cards due for review")
 	}
 
-	fmt.Printf("[DEBUG-TEST-GETDUE] Successfully got due card with ID: %s\n", cardResponse.Card.ID)
+	fSUT.Logger.Debug("Successfully got due card", zap.String("card_id", cardResponse.Card.ID))
 	return cardResponse
 }
 

@@ -4,11 +4,14 @@ package propertytest
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/leanovate/gopter/commands"
 	"github.com/mark3labs/mcp-go/client"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // TestCommon provides basic wrappers to other functions in the propertytest package
@@ -88,14 +91,45 @@ func SetupTestClientWithLongTimeout(t *testing.T, timeoutSeconds int) (*client.C
 // FlashcardSUTFactory creates a new FlashcardSUT instance for testing
 func FlashcardSUTFactory(mcpClient *client.Client, ctx context.Context, cancel context.CancelFunc, tempCleanup func(), t *testing.T) *FlashcardSUT {
 	t.Helper()
+
+	// Initialize Zap logger
+	logConfig := zap.NewDevelopmentConfig()
+	logConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder // Colorful levels
+	logConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder        // Standard time format
+	logConfig.EncoderConfig.CallerKey = ""                                 // Don't log caller
+
+	// Set log level based on environment variable
+	if os.Getenv("MCP_DEBUG") == "true" {
+		t.Log("MCP_DEBUG is true, setting log level to Debug")
+		logConfig.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	} else {
+		t.Log("MCP_DEBUG is not set or false, setting log level to Info")
+		logConfig.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	}
+
+	logger, err := logConfig.Build(zap.AddStacktrace(zapcore.ErrorLevel)) // Add stacktrace for errors
+	if err != nil {
+		t.Fatalf("Failed to create zap logger: %v", err)
+	}
+
+	// Ensure logger is synced on cleanup
+	originalCleanup := tempCleanup
+	syncedCleanup := func() {
+		if originalCleanup != nil {
+			originalCleanup()
+		}
+		_ = logger.Sync() // Ignore sync errors
+	}
+
 	// Note: The caller of this factory is responsible for ensuring tempCleanup is called.
 	// This factory doesn't manage the lifecycle itself.
 	return &FlashcardSUT{
 		Client:             mcpClient,
 		Ctx:                ctx,
 		Cancel:             cancel,
-		tempDirCleanupFunc: tempCleanup, // Assign the temp dir cleanup
+		tempDirCleanupFunc: syncedCleanup, // Use cleanup func that also syncs logger
 		T:                  t,
+		Logger:             logger, // Assign the created logger
 	}
 }
 
