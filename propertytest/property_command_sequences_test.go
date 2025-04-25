@@ -10,6 +10,8 @@ import (
 	"github.com/leanovate/gopter"
 	gopterCmds "github.com/leanovate/gopter/commands" // Renamed import
 	"github.com/leanovate/gopter/gen"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // TestCommandSequences verifies the consistency of the system through random command sequences.
@@ -88,13 +90,13 @@ func TestCommandSequences(t *testing.T) {
 			return nil
 		}
 
-		return &FlashcardSUT{
-			Client:             mcpClient,
-			Ctx:                ctx,
-			Cancel:             cancel,
-			tempDirCleanupFunc: tempCleanup,
-			T:                  testingT,
+		// Use the factory to create the SUT, which includes the logger
+		sut := FlashcardSUTFactory(mcpClient, ctx, cancel, tempCleanup, testingT)
+		if sut == nil { // Factory should handle fatal errors, but check just in case
+			testingT.Fatalf("FlashcardSUTFactory returned nil SUT")
+			return nil
 		}
+		return sut
 	}
 
 	// Define the function to destroy the system under test
@@ -129,11 +131,24 @@ func TestCommandSequences(t *testing.T) {
 		flashcardSUT.T.Logf("SUT Destroyed.")
 	}
 
+	// Initialize Zap logger for the initial state
+	logConfig := zap.NewDevelopmentConfig()
+	logConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	logConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	logConfig.EncoderConfig.CallerKey = ""
+	logConfig.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	initialStateLogger, err := logConfig.Build(zap.AddStacktrace(zapcore.ErrorLevel))
+	if err != nil {
+		t.Fatalf("Failed to create zap logger for initial state: %v", err)
+	}
+	t.Cleanup(func() { _ = initialStateLogger.Sync() })
+
 	// Initial state generator
 	initialStateGen := gen.Const(&CommandState{
 		Cards:        make(map[string]Card),
 		KnownRealIDs: []string{},
-		T:            t, // Pass the test context here
+		T:            t,                  // Pass the test context here
+		Logger:       initialStateLogger, // Pass the logger here
 	})
 
 	// Command generator function

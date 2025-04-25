@@ -39,6 +39,7 @@ type CommandState struct {
 	KnownRealIDs []string        // List of REAL IDs known to exist
 	LastRealID   string          // Last REAL ID created/focused
 	T            *testing.T      // Testing context for logging
+	Logger       *zap.Logger     // Added logger
 }
 
 // Helper to create a deep copy of the state
@@ -48,6 +49,7 @@ func (s *CommandState) deepCopy() *CommandState {
 		KnownRealIDs: make([]string, len(s.KnownRealIDs)),
 		LastRealID:   s.LastRealID,
 		T:            s.T,
+		Logger:       s.Logger, // Copy logger reference
 	}
 	for k, v := range s.Cards {
 		newState.Cards[k] = v // Card struct is assumed to be copyable or immutable enough
@@ -134,20 +136,21 @@ func (c *CreateCardCmd) PostCondition(state commands.State, result commands.Resu
 	label := fmt.Sprintf("PostCondition %s", c.String())
 	if errResult, ok := result.(error); ok {
 		// If Run failed, the state hasn't changed, just report the error
-		cmdState.T.Logf("PostCondition failed for %s due to Run error: %v", c.String(), errResult)
+		cmdState.Logger.Debug("PostCondition failed for CreateCardCmd due to Run error", zap.String("command", c.String()), zap.Error(errResult))
 		return gopter.NewPropResult(false, label)
 	}
 	createResponse, ok := result.(CreateCardResponse)
 	if !ok {
 		// Invalid result type, fail
-		cmdState.T.Logf("PostCondition failed for %s due to invalid result type: %T", c.String(), result)
+		cmdState.Logger.Debug("PostCondition failed for CreateCardCmd due to invalid result type", zap.String("command", c.String()), zap.String("result_type", fmt.Sprintf("%T", result)))
 		return gopter.NewPropResult(false, label)
 	}
 
 	// Basic validation of the response card data against the command input
 	if createResponse.Card.Front != c.Front || createResponse.Card.Back != c.Back || !CompareTags(c.Tags, createResponse.Card.Tags) {
-		cmdState.T.Logf("Create PostCondition failed: Data mismatch. Expected Front='%s', Back='%s', Tags=%v. Got Front='%s', Back='%s', Tags=%v",
-			c.Front, c.Back, c.Tags, createResponse.Card.Front, createResponse.Card.Back, createResponse.Card.Tags)
+		cmdState.Logger.Debug("Create PostCondition failed: Data mismatch",
+			zap.String("expected_front", c.Front), zap.String("expected_back", c.Back), zap.Strings("expected_tags", c.Tags),
+			zap.String("actual_front", createResponse.Card.Front), zap.String("actual_back", createResponse.Card.Back), zap.Strings("actual_tags", createResponse.Card.Tags))
 		return gopter.NewPropResult(false, label)
 	}
 
@@ -155,7 +158,7 @@ func (c *CreateCardCmd) PostCondition(state commands.State, result commands.Resu
 	realID := createResponse.Card.ID
 	if _, exists := cmdState.Cards[realID]; exists {
 		// This *shouldn't* happen if preconditions and Run are correct, but it's a sanity check.
-		cmdState.T.Logf("Create PostCondition warning: Card ID %s already exists in the model state *before* creation!", realID)
+		cmdState.Logger.Warn("Create PostCondition warning: Card ID already exists in the model state *before* creation!", zap.String("card_id", realID))
 		// We might still proceed, assuming the system overwrote or handled it, but log a warning.
 	}
 
@@ -184,7 +187,7 @@ func (c *CreateCardCmd) PostCondition(state commands.State, result commands.Resu
 		cmdState.KnownRealIDs = append(cmdState.KnownRealIDs, realID) // Mutate the slice directly
 	}
 
-	cmdState.T.Logf("PostCondition %s: Updated model state with real ID %s", c.String(), realID)
+	cmdState.Logger.Debug("PostCondition CreateCardCmd: Updated model state", zap.String("command", c.String()), zap.String("real_id", realID))
 
 	return gopter.NewPropResult(true, label)
 }
@@ -252,25 +255,25 @@ func (c *GetCardCmd) PostCondition(state commands.State, result commands.Result)
 	if errResult, ok := result.(error); ok {
 		// If card doesn't exist in model and we got an error, this is acceptable
 		if !cardExistsInModel {
-			cmdState.T.Logf("Card %s should not exist in model, and get operation properly failed with: %v", c.CardID, errResult)
+			cmdState.Logger.Debug("Card does not exist in model, and get operation properly failed", zap.String("card_id", c.CardID), zap.Error(errResult))
 			return gopter.NewPropResult(true, label)
 		}
 
 		// If the error contains "not found", this is acceptable due to test state reset
 		errMsg := strings.ToLower(errResult.Error())
 		if strings.Contains(errMsg, "not found") {
-			cmdState.T.Logf("Card %s was not found, but exists in model. This is acceptable due to test state reset.", c.CardID)
+			cmdState.Logger.Debug("Card was not found, but exists in model. Acceptable due to test state reset.", zap.String("card_id", c.CardID))
 			return gopter.NewPropResult(true, label)
 		}
 
 		// For other errors, fail the test
-		cmdState.T.Logf("PostCondition failed for %s due to Run error: %v", c.String(), errResult)
+		cmdState.Logger.Debug("PostCondition failed for GetCardCmd due to Run error", zap.String("command", c.String()), zap.Error(errResult))
 		return gopter.NewPropResult(false, label)
 	}
 
 	// If the card doesn't exist in model but we didn't get an error
 	if !cardExistsInModel {
-		cmdState.T.Logf("Card %s does not exist in model, but get operation didn't fail", c.CardID)
+		cmdState.Logger.Debug("Card does not exist in model, but get operation didn't fail", zap.String("card_id", c.CardID))
 		// We'll return true instead of false to be tolerant of timing differences
 		return gopter.NewPropResult(true, label)
 	}
@@ -278,7 +281,7 @@ func (c *GetCardCmd) PostCondition(state commands.State, result commands.Result)
 	// Normal success case - card exists in both model and system
 	listResponse, ok := result.(ListCardsResponse)
 	if !ok {
-		cmdState.T.Logf("Expected ListCardsResponse but got %T", result)
+		cmdState.Logger.Debug("Expected ListCardsResponse but got different type", zap.String("actual_type", fmt.Sprintf("%T", result)))
 		return gopter.NewPropResult(true, label) // Be tolerant of response type issues
 	}
 
@@ -291,7 +294,7 @@ func (c *GetCardCmd) PostCondition(state commands.State, result commands.Result)
 		}
 	}
 	if !found {
-		cmdState.T.Logf("Card %s was not found in the response cards list", c.CardID)
+		cmdState.Logger.Debug("Card was not found in the response cards list", zap.String("card_id", c.CardID))
 		// Be tolerant of card not being found in the response
 		return gopter.NewPropResult(true, label)
 	}
@@ -399,22 +402,22 @@ func (c *DeleteCardCmd) PostCondition(state commands.State, result commands.Resu
 		// Check if the error is "card not found"
 		errMsg := strings.ToLower(errResult.Error())
 		if strings.Contains(errMsg, "not found") {
-			cmdState.T.Logf("Card %s was already deleted. This is acceptable due to test state reset.", c.CardID)
+			cmdState.Logger.Debug("Card was already deleted. Acceptable due to test state reset.", zap.String("card_id", c.CardID))
 			return gopter.NewPropResult(true, label)
 		}
 
 		// For other errors, log but don't fail - be tolerant
-		cmdState.T.Logf("DeleteCard for %s returned error: %v. Treating as acceptable due to test tolerance.", c.CardID, errResult)
+		cmdState.Logger.Debug("DeleteCard returned error. Treating as acceptable due to test tolerance.", zap.String("card_id", c.CardID), zap.Error(errResult))
 		return gopter.NewPropResult(true, label)
 	}
 
 	deleteResp, ok := result.(DeleteCardResponse)
 	if !ok {
-		cmdState.T.Logf("Expected DeleteCardResponse but got %T. Treating as acceptable.", result)
+		cmdState.Logger.Debug("Expected DeleteCardResponse but got different type. Treating as acceptable.", zap.String("actual_type", fmt.Sprintf("%T", result)))
 		return gopter.NewPropResult(true, label)
 	}
 	if !deleteResp.Success {
-		cmdState.T.Logf("DeleteCard returned success=false: %s. Treating as acceptable.", deleteResp.Message)
+		cmdState.Logger.Debug("DeleteCard returned success=false. Treating as acceptable.", zap.String("message", deleteResp.Message))
 		return gopter.NewPropResult(true, label)
 	}
 	return gopter.NewPropResult(true, label)
@@ -551,19 +554,19 @@ func (c *UpdateCardCmd) PostCondition(state commands.State, result commands.Resu
 				strings.Contains(errorMsg, "card not found") ||
 				strings.Contains(errorMsg, "failure") {
 				// This is expected behavior - card was deleted
-				cmdState.T.Logf("Card %s was deleted, update failed as expected with: %v", c.CardID, errResult)
+				cmdState.Logger.Debug("Card was deleted, update failed as expected", zap.String("card_id", c.CardID), zap.Error(errResult))
 				return gopter.NewPropResult(true, label)
 			}
 		}
 
 		// For any error, log but don't fail the test - be tolerant due to file reset
-		cmdState.T.Logf("UpdateCard for %s returned error: %v - treating as acceptable due to test tolerance", c.CardID, errResult)
+		cmdState.Logger.Debug("UpdateCard returned error. Treating as acceptable due to test tolerance.", zap.String("card_id", c.CardID), zap.Error(errResult))
 		return gopter.NewPropResult(true, label)
 	}
 
 	// If the card doesn't exist in model but we didn't get an error
 	if !cardExistsInModel {
-		cmdState.T.Logf("Card %s does not exist in model, but update didn't fail", c.CardID)
+		cmdState.Logger.Debug("Card does not exist in model, but update didn't fail. Treating as acceptable.", zap.String("card_id", c.CardID))
 		// We'll return true instead of false to be tolerant of timing differences
 		return gopter.NewPropResult(true, label)
 	}
@@ -571,11 +574,11 @@ func (c *UpdateCardCmd) PostCondition(state commands.State, result commands.Resu
 	// Normal success case
 	updateResp, ok := result.(UpdateCardResponse)
 	if !ok {
-		cmdState.T.Logf("Expected UpdateCardResponse but got %T - treating as acceptable", result)
+		cmdState.Logger.Debug("Expected UpdateCardResponse but got different type. Treating as acceptable.", zap.String("actual_type", fmt.Sprintf("%T", result)))
 		return gopter.NewPropResult(true, label)
 	}
 	if !updateResp.Success {
-		cmdState.T.Logf("UpdateCard returned success=false: %s - treating as acceptable", updateResp.Message)
+		cmdState.Logger.Debug("UpdateCard returned success=false. Treating as acceptable.", zap.String("message", updateResp.Message))
 		return gopter.NewPropResult(true, label)
 	}
 
@@ -583,23 +586,23 @@ func (c *UpdateCardCmd) PostCondition(state commands.State, result commands.Resu
 	// Get the card from the *current* model state (which NextState returned)
 	updatedModelCard, ok := state.(*CommandState).Cards[c.CardID]
 	if !ok {
-		cmdState.T.Logf("Card %s no longer exists in model state - treating as acceptable", c.CardID)
+		cmdState.Logger.Debug("Card no longer exists in model state. Treating as acceptable.", zap.String("card_id", c.CardID))
 		return gopter.NewPropResult(true, label)
 	}
 
 	if updatedModelCard.Front != c.ExpectedFront {
-		cmdState.T.Logf("Front value mismatch: expected '%s', actual '%s' - treating as acceptable",
-			c.ExpectedFront, updatedModelCard.Front)
+		cmdState.Logger.Debug("Front value mismatch. Treating as acceptable.",
+			zap.String("expected", c.ExpectedFront), zap.String("actual", updatedModelCard.Front))
 		return gopter.NewPropResult(true, label)
 	}
 	if updatedModelCard.Back != c.ExpectedBack {
-		cmdState.T.Logf("Back value mismatch: expected '%s', actual '%s' - treating as acceptable",
-			c.ExpectedBack, updatedModelCard.Back)
+		cmdState.Logger.Debug("Back value mismatch. Treating as acceptable.",
+			zap.String("expected", c.ExpectedBack), zap.String("actual", updatedModelCard.Back))
 		return gopter.NewPropResult(true, label)
 	}
 	if !CompareTags(c.ExpectedTags, updatedModelCard.Tags) {
-		cmdState.T.Logf("Tags mismatch: expected %v, actual %v - treating as acceptable",
-			c.ExpectedTags, updatedModelCard.Tags)
+		cmdState.Logger.Debug("Tags mismatch. Treating as acceptable.",
+			zap.Strings("expected", c.ExpectedTags), zap.Strings("actual", updatedModelCard.Tags))
 		return gopter.NewPropResult(true, label)
 	}
 
@@ -790,19 +793,19 @@ func (c *SubmitReviewCmd) PostCondition(state commands.State, result commands.Re
 		// If the error is "card not found", this is acceptable
 		// due to potential state reset between commands
 		if strings.Contains(errMsg, "card not found") {
-			cmdState.T.Logf("Card %s was not found during SubmitReview. This is acceptable due to test state reset.", c.CardID)
+			cmdState.Logger.Debug("Card was not found during SubmitReview. Acceptable due to test state reset.", zap.String("card_id", c.CardID))
 			return gopter.NewPropResult(true, label)
 		}
 
 		// For other errors, fail the test
-		cmdState.T.Logf("PostCondition failed for %s due to Run error: %v", c.String(), errResult)
+		cmdState.Logger.Debug("PostCondition failed for SubmitReviewCmd due to Run error", zap.String("command", c.String()), zap.Error(errResult))
 		return gopter.NewPropResult(false, label)
 	}
 
 	// Process success case
 	reviewResp, ok := result.(ReviewResponse)
 	if !ok {
-		cmdState.T.Logf("PostCondition failed for %s due to invalid response type: %T", c.String(), result)
+		cmdState.Logger.Debug("PostCondition failed for SubmitReviewCmd due to invalid response type", zap.String("command", c.String()), zap.String("actual_type", fmt.Sprintf("%T", result)))
 		return gopter.NewPropResult(false, label)
 	}
 
@@ -810,7 +813,7 @@ func (c *SubmitReviewCmd) PostCondition(state commands.State, result commands.Re
 	card, exists := cmdState.Cards[c.CardID]
 	if !exists {
 		// The card doesn't exist in our model, which is inconsistent
-		cmdState.T.Logf("Card %s does not exist in model but was successfully reviewed", c.CardID)
+		cmdState.Logger.Debug("Card does not exist in model but was successfully reviewed", zap.String("card_id", c.CardID))
 		return gopter.NewPropResult(false, label)
 	}
 
@@ -821,8 +824,9 @@ func (c *SubmitReviewCmd) PostCondition(state commands.State, result commands.Re
 	// between our model and the actual system implementation.
 	// This is fine as long as something reasonable happened.
 	if card.FSRS.State != updatedCard.FSRS.State {
-		cmdState.T.Logf("Note: FSRS state different than model: expected %d (%d), got %d (%d) - this is acceptable",
-			card.FSRS.State, card.FSRS.State, updatedCard.FSRS.State, updatedCard.FSRS.State)
+		cmdState.Logger.Debug("Note: FSRS state different than model - this is acceptable",
+			zap.Int("model_state", int(card.FSRS.State)),
+			zap.Int("actual_state", int(updatedCard.FSRS.State)))
 	}
 
 	// Update model state regardless of any state differences
@@ -1023,12 +1027,12 @@ func (c *GetDueCardCmd) PostCondition(state commands.State, result commands.Resu
 			}
 
 			if expectedError {
-				cmdState.T.Logf("Got expected error (type %d) for %s: %v", c.ExpectedErrorType, c.String(), errResult)
+				cmdState.Logger.Debug("Got expected error for GetDueCardCmd", zap.Int("expected_error_type", int(c.ExpectedErrorType)), zap.String("command", c.String()), zap.Error(errResult))
 				return gopter.NewPropResult(true, label)
 			}
 
 			// Model predicted an error, but the actual error message doesn't match the type
-			cmdState.T.Logf("Model expected error type %d, but got mismatching error message: %v", c.ExpectedErrorType, errResult)
+			cmdState.Logger.Debug("Model expected error, but got mismatching error message. Treating as acceptable.", zap.Int("expected_error_type", int(c.ExpectedErrorType)), zap.Error(errResult))
 			// Treat unexpected error messages more strictly? For now, allow if model predicted *any* error.
 			return gopter.NewPropResult(true, label) // Still accept if an error was expected
 
@@ -1040,12 +1044,12 @@ func (c *GetDueCardCmd) PostCondition(state commands.State, result commands.Resu
 			strings.Contains(errorMsg, "no cards found") ||
 			strings.Contains(errorMsg, "specified tags")
 		if isNoCardsError {
-			cmdState.T.Logf("Model expected success, but got 'no cards' error (accepted tolerantly): %v", errResult)
+			cmdState.Logger.Debug("Model expected success, but got 'no cards' error (accepted tolerantly)", zap.Error(errResult))
 			return gopter.NewPropResult(true, label)
 		}
 
 		// Unexpected error when success was predicted by model
-		cmdState.T.Logf("Unexpected error from get_due_card when model predicted success: %v", errResult)
+		cmdState.Logger.Debug("Unexpected error from get_due_card when model predicted success", zap.Error(errResult))
 		return gopter.NewPropResult(false, label)
 	}
 
@@ -1053,8 +1057,8 @@ func (c *GetDueCardCmd) PostCondition(state commands.State, result commands.Resu
 
 	// Did the model predict an error, but we got success?
 	if c.ExpectedErrorType != ErrorTypeNone {
-		cmdState.T.Logf("Model expected error type %d for %s, but received success: %v",
-			c.ExpectedErrorType, c.String(), result)
+		cmdState.Logger.Debug("Model expected error, but received success",
+			zap.Int("expected_error_type", int(c.ExpectedErrorType)), zap.String("command", c.String()), zap.Any("result", result))
 		// This indicates a mismatch and should fail the test.
 		return gopter.NewPropResult(false, label)
 	}
@@ -1062,14 +1066,14 @@ func (c *GetDueCardCmd) PostCondition(state commands.State, result commands.Resu
 	// --- Normal success case: Model predicted success, Run returned success ---
 	cardResponse, ok := result.(CardResponse)
 	if !ok {
-		cmdState.T.Logf("Expected CardResponse but got %T", result)
+		cmdState.Logger.Debug("Expected CardResponse but got different type", zap.String("actual_type", fmt.Sprintf("%T", result)))
 		return gopter.NewPropResult(false, label)
 	}
 
 	// Check if the returned card exists in our model state (basic sanity check)
 	_, found := cmdState.Cards[cardResponse.Card.ID]
 	if !found {
-		cmdState.T.Logf("Returned card ID %s is not in our model state", cardResponse.Card.ID)
+		cmdState.Logger.Debug("Returned card ID is not in our model state", zap.String("card_id", cardResponse.Card.ID))
 		return gopter.NewPropResult(false, label)
 	}
 
@@ -1086,18 +1090,18 @@ func (c *GetDueCardCmd) PostCondition(state commands.State, result commands.Resu
 		// Model predicted specific card(s) should be returned, but a different one was.
 		// This indicates a potential priority calculation mismatch or timing issue.
 		// Log it, but treat it as acceptable for now to avoid excessive flakiness.
-		cmdState.T.Logf("Note: Returned card ID %s was not among the model's expected highest priority IDs %v - this is acceptable",
-			cardResponse.Card.ID, c.ExpectedCardIDs)
+		cmdState.Logger.Debug("Note: Returned card ID was not among the model's expected highest priority IDs - this is acceptable",
+			zap.String("returned_card_id", cardResponse.Card.ID), zap.Strings("expected_card_ids", c.ExpectedCardIDs))
 	} else {
-		cmdState.T.Logf("Returned card ID %s matches one of the expected highest priority IDs %v",
-			cardResponse.Card.ID, c.ExpectedCardIDs)
+		cmdState.Logger.Debug("Returned card ID matches one of the expected highest priority IDs",
+			zap.String("returned_card_id", cardResponse.Card.ID), zap.Strings("expected_card_ids", c.ExpectedCardIDs))
 	}
 
 	// Check stats for basic validity
 	if cardResponse.Stats.TotalCards < 0 || cardResponse.Stats.DueCards < 0 ||
 		cardResponse.Stats.ReviewsToday < 0 || cardResponse.Stats.RetentionRate < 0 ||
 		cardResponse.Stats.RetentionRate > 100 {
-		cmdState.T.Logf("Stats contain unreasonable values: %+v", cardResponse.Stats)
+		cmdState.Logger.Debug("Stats contain unreasonable values", zap.Any("stats", cardResponse.Stats))
 		return gopter.NewPropResult(false, label)
 	}
 

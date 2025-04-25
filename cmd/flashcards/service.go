@@ -11,35 +11,63 @@ import (
 	"github.com/danieldreier/mcp-flashcards/internal/storage"
 	"github.com/google/uuid"
 	gofsrs "github.com/open-spaced-repetition/go-fsrs"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // FlashcardService manages operations for flashcards with storage and FSRS algorithm
 type FlashcardService struct {
 	Storage     storage.Storage // Interface for storage operations
 	FSRSManager fsrs.FSRSManager
+	Logger      *zap.Logger
 }
 
 // NewFlashcardService creates a new FlashcardService
 func NewFlashcardService(storage storage.Storage) *FlashcardService {
+	// Initialize Zap logger
+	logConfig := zap.NewDevelopmentConfig() // Use development config for human-readable output
+	// Customize encoder if needed (e.g., time format, level encoding)
+	// logConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	// Set log level (e.g., Debug, Info, Warn, Error)
+	logConfig.Level = zap.NewAtomicLevelAt(zap.DebugLevel) // Default to Debug, can be configured
+
+	logger, err := logConfig.Build(zap.AddStacktrace(zapcore.ErrorLevel))
+	if err != nil {
+		// Fallback to standard logger if zap fails (shouldn't normally happen)
+		fmt.Printf("Error initializing zap logger: %v. Falling back to stdlib log.\n", err)
+		return &FlashcardService{
+			Storage:     storage,
+			FSRSManager: fsrs.NewFSRSManager(),
+			Logger:      zap.NewNop(), // Use Nop logger as fallback
+		}
+	}
+
+	// Optionally, sync logger on shutdown (e.g., in a Close method or via defer in main)
+	// defer logger.Sync()
+
 	return &FlashcardService{
 		Storage:     storage,
 		FSRSManager: fsrs.NewFSRSManager(),
+		Logger:      logger,
 	}
 }
 
 // CreateCard creates a new flashcard using the Storage layer
 func (s *FlashcardService) CreateCard(front, back string, tags []string) (Card, error) {
+	s.Logger.Debug("Service CreateCard called", zap.String("front", front), zap.String("back", back), zap.Strings("tags", tags))
 	// Delegate creation to the storage layer, which handles FSRS initialization
 	storageCard, err := s.Storage.CreateCard(front, back, tags)
 	if err != nil {
+		s.Logger.Error("Error creating card in storage", zap.Error(err))
 		return Card{}, fmt.Errorf("error creating card in storage: %w", err)
 	}
+	s.Logger.Debug("Card created in storage layer", zap.String("card_id", storageCard.ID))
 
 	// Persist changes to disk (Save should ideally be part of the storage method)
 	// Assuming storage methods don't auto-save for now.
 	if err := s.Storage.Save(); err != nil {
 		// Attempt to rollback? Difficult. Log error.
-		fmt.Printf("Warning: failed to save storage after creating card %s: %v\n", storageCard.ID, err)
+		s.Logger.Warn("Failed to save storage after creating card, but card exists in memory", zap.String("card_id", storageCard.ID), zap.Error(err))
 		// Continue anyway, card exists in memory layer of storage
 	}
 
@@ -130,27 +158,28 @@ func equalStringSlices(a, b []string) bool {
 
 // DeleteCard deletes a flashcard
 func (s *FlashcardService) DeleteCard(cardID string) error {
-	fmt.Printf("[DEBUG-SVC-DELETE] Starting DeleteCard for ID %s\n", cardID)
+	s.Logger.Debug("Starting DeleteCard", zap.String("card_id", cardID))
 	// Delete the card from storage
 	if err := s.Storage.DeleteCard(cardID); err != nil {
-		fmt.Printf("[DEBUG-SVC-DELETE] Storage.DeleteCard returned error: %v\n", err)
+		s.Logger.Error("Storage.DeleteCard returned error", zap.String("card_id", cardID), zap.Error(err))
 		return fmt.Errorf("error deleting card: %w", err)
 	}
-	fmt.Printf("[DEBUG-SVC-DELETE] Card deleted from storage successfully\n")
+	s.Logger.Debug("Card deleted from storage successfully", zap.String("card_id", cardID))
 
 	// Persist changes to disk
-	fmt.Printf("[DEBUG-SVC-DELETE] Now calling Storage.Save()\n")
+	s.Logger.Debug("Calling Storage.Save() after delete", zap.String("card_id", cardID))
 	if err := s.Storage.Save(); err != nil {
-		fmt.Printf("[DEBUG-SVC-DELETE] Storage.Save() returned error: %v\n", err)
+		s.Logger.Error("Storage.Save() returned error after delete", zap.String("card_id", cardID), zap.Error(err))
 		return fmt.Errorf("error saving storage: %w", err)
 	}
-	fmt.Printf("[DEBUG-SVC-DELETE] Storage.Save() completed successfully\n")
+	s.Logger.Debug("Storage.Save() completed successfully after delete", zap.String("card_id", cardID))
 
 	return nil
 }
 
 // ListCards lists all flashcards, optionally filtered by tags
 func (s *FlashcardService) ListCards(filterTags []string, includeStats bool) ([]Card, CardStats, error) {
+	s.Logger.Debug("Service ListCards called", zap.Strings("filterTags", filterTags), zap.Bool("includeStats", includeStats))
 	// Use storage ListCards with the filter
 	storageCards, err := s.Storage.ListCards(filterTags)
 	if err != nil {
@@ -178,7 +207,7 @@ func (s *FlashcardService) ListCards(filterTags []string, includeStats bool) ([]
 		allStorageCards, err := s.Storage.ListCards(nil)
 		if err != nil {
 			// Log error but proceed with potentially empty stats
-			fmt.Printf("Warning: error getting all cards for stats: %v\n", err)
+			s.Logger.Warn("Error getting all cards for stats calculation", zap.Error(err))
 			stats = CardStats{TotalCards: len(storageCards)} // Use filtered count as fallback?
 		} else {
 			stats = s.calculateStats(allStorageCards)
@@ -190,21 +219,23 @@ func (s *FlashcardService) ListCards(filterTags []string, includeStats bool) ([]
 
 // GetDueCard returns the next card due for review with statistics, optionally filtered by tags
 func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, error) {
-	fmt.Printf("[DEBUG-SVC] GetDueCard called with filterTags: %v\n", filterTags)
+	s.Logger.Debug("GetDueCard called", zap.Strings("filterTags", filterTags))
 	// Get all cards from storage first to calculate overall statistics
 	allCards, err := s.Storage.ListCards(nil)
 	if err != nil {
-		fmt.Printf("[DEBUG-SVC] GetDueCard: error listing all cards: %v\n", err)
+		s.Logger.Error("GetDueCard: error listing all cards", zap.Error(err))
 		return Card{}, CardStats{}, fmt.Errorf("error listing all cards: %w", err)
 	}
-	fmt.Printf("[DEBUG-SVC] GetDueCard: Found %d total cards in storage.\n", len(allCards))
+	s.Logger.Debug("GetDueCard: Found total cards in storage.", zap.Int("count", len(allCards)))
 
 	// Debug - print all card IDs
-	fmt.Printf("[DEBUG-SVC] All card IDs: [")
-	for _, card := range allCards {
-		fmt.Printf("%s, ", card.ID)
+	if len(allCards) > 0 {
+		ids := make([]string, len(allCards))
+		for i, card := range allCards {
+			ids[i] = card.ID
+		}
+		s.Logger.Debug("All card IDs in storage", zap.Strings("ids", ids))
 	}
-	fmt.Printf("]\n")
 
 	// Calculate overall statistics based on all cards
 	stats := s.calculateStats(allCards)
@@ -212,30 +243,35 @@ func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, err
 	// If no filter tags were provided, get all cards
 	var cardsToConsider []storage.Card
 	if len(filterTags) == 0 {
-		fmt.Printf("[DEBUG-SVC] GetDueCard: No filter tags provided, considering all %d cards.\n", len(allCards))
+		s.Logger.Debug("GetDueCard: No filter tags provided, considering all cards.", zap.Int("count", len(allCards)))
 		cardsToConsider = allCards
 	} else {
-		fmt.Printf("[DEBUG-SVC] GetDueCard: Filtering %d cards by tags: %v\n", len(allCards), filterTags)
+		s.Logger.Debug("GetDueCard: Filtering cards by tags", zap.Int("card_count", len(allCards)), zap.Strings("filterTags", filterTags))
 		// When filter tags are provided, we need to find cards with ALL the specified tags
 		for i, card := range allCards {
 			matches := hasAllRequiredTags(&card, filterTags)
-			fmt.Printf("[DEBUG-SVC] GetDueCard: Checking card %d (ID: %s, Tags: %v) against filter %v -> Matches: %t\n", i, card.ID, card.Tags, filterTags, matches)
+			s.Logger.Debug("GetDueCard: Checking card against tag filter",
+				zap.Int("index", i),
+				zap.String("card_id", card.ID),
+				zap.Strings("card_tags", card.Tags),
+				zap.Strings("filter_tags", filterTags),
+				zap.Bool("matches", matches))
 			if matches {
 				cardsToConsider = append(cardsToConsider, card)
 			}
 		}
-		fmt.Printf("[DEBUG-SVC] GetDueCard: Filtering complete. %d cards matched the tags.\n", len(cardsToConsider))
+		s.Logger.Debug("GetDueCard: Filtering complete.", zap.Int("matched_count", len(cardsToConsider)))
 
 		// If no cards match the tag filter, return an error
 		if len(cardsToConsider) == 0 {
-			fmt.Printf("[DEBUG-SVC] GetDueCard: No cards matched tags, returning error.\n")
+			s.Logger.Debug("GetDueCard: No cards matched tags, returning error.")
 			return Card{}, stats, fmt.Errorf("no cards found with the specified tags: %v", filterTags)
 		}
 	}
 
 	// Current time for priority calculation
 	now := time.Now()
-	fmt.Printf("[DEBUG-SVC] GetDueCard: Finding due cards among %d considered cards.\n", len(cardsToConsider))
+	s.Logger.Debug("GetDueCard: Finding due cards", zap.Int("considered_count", len(cardsToConsider)))
 
 	// Find due cards from the filtered list and calculate priority
 	var dueCards []struct {
@@ -245,7 +281,10 @@ func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, err
 
 	for _, storageCard := range cardsToConsider { // Iterate over the filtered list
 		cardIsDue := !storageCard.FSRS.Due.After(now)
-		fmt.Printf("[DEBUG-SVC] GetDueCard: Checking considered card ID %s (Due: %v, IsDue: %t)\n", storageCard.ID, storageCard.FSRS.Due, cardIsDue)
+		s.Logger.Debug("GetDueCard: Checking considered card due status",
+			zap.String("card_id", storageCard.ID),
+			zap.Time("due", storageCard.FSRS.Due),
+			zap.Bool("is_due", cardIsDue))
 		// Consider cards due now or in the past
 		if cardIsDue {
 			priority := s.FSRSManager.GetReviewPriority(storageCard.FSRS.State, storageCard.FSRS.Due, now)
@@ -262,10 +301,10 @@ func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, err
 				card     Card
 				priority float64
 			}{card, priority})
-			fmt.Printf("[DEBUG-SVC] GetDueCard: Added due card ID %s to list (Priority: %f)\n", card.ID, priority)
+			s.Logger.Debug("GetDueCard: Added due card to list", zap.String("card_id", card.ID), zap.Float64("priority", priority))
 		}
 	}
-	fmt.Printf("[DEBUG-SVC] GetDueCard: Found %d due cards among considered cards.\n", len(dueCards))
+	s.Logger.Debug("GetDueCard: Found due cards among considered cards.", zap.Int("due_count", len(dueCards)))
 
 	// Sort the due cards (from the filtered list) by priority (highest first)
 	sort.Slice(dueCards, func(i, j int) bool {
@@ -275,16 +314,16 @@ func (s *FlashcardService) GetDueCard(filterTags []string) (Card, CardStats, err
 	// Return highest priority card from the filtered set or error if none due
 	if len(dueCards) == 0 {
 		if len(filterTags) > 0 {
-			fmt.Printf("[DEBUG-SVC] GetDueCard: No DUE cards matched tags, returning error.\n")
+			s.Logger.Debug("GetDueCard: No DUE cards matched tags, returning error.")
 			return Card{}, stats, fmt.Errorf("no cards due for review with the specified tags: %v", filterTags)
 		}
 		// No filter, but no cards due
-		fmt.Printf("[DEBUG-SVC] GetDueCard: No cards are due for review, returning error.\n")
+		s.Logger.Debug("GetDueCard: No cards are due for review, returning error.")
 		return Card{}, stats, fmt.Errorf("no cards due for review")
 	}
 
 	// Return the highest priority card from the filtered due list, along with overall stats
-	fmt.Printf("[DEBUG-SVC] GetDueCard: Returning highest priority card ID %s.\n", dueCards[0].card.ID)
+	s.Logger.Debug("GetDueCard: Returning highest priority card", zap.String("card_id", dueCards[0].card.ID))
 	return dueCards[0].card, stats, nil
 }
 
@@ -374,27 +413,31 @@ func (s *FlashcardService) SubmitReview(cardID string, rating gofsrs.Rating, ans
 // with a specific timestamp. This allows tests to provide a simulated "now" timestamp.
 func (s *FlashcardService) SubmitReviewWithTime(cardID string, rating gofsrs.Rating, answer string, now time.Time) (Card, error) {
 	startTime := now
-	fmt.Printf("[DEBUG-SVC] SubmitReview starting for cardID=%s, rating=%d at %v\n",
-		cardID, rating, startTime.Format(time.RFC3339Nano))
+	s.Logger.Debug("SubmitReview starting",
+		zap.String("card_id", cardID),
+		zap.Int("rating", int(rating)),
+		zap.Time("start_time", startTime))
 
 	// Get the card from storage
-	fmt.Printf("[DEBUG-SVC] Retrieving card from storage\n")
+	s.Logger.Debug("Retrieving card from storage", zap.String("card_id", cardID))
 	storageCard, err := s.Storage.GetCard(cardID)
 	if err != nil {
-		fmt.Printf("[DEBUG-SVC] Error getting card: %v\n", err)
+		s.Logger.Error("Error getting card", zap.String("card_id", cardID), zap.Error(err))
 		return Card{}, fmt.Errorf("error getting card: %w", err)
 	}
-	fmt.Printf("[DEBUG-SVC] Retrieved card with current state=%v, due=%v\n",
-		storageCard.FSRS.State, storageCard.FSRS.Due)
+	s.Logger.Debug("Retrieved card from storage",
+		zap.String("card_id", cardID),
+		zap.Int("current_state", int(storageCard.FSRS.State)),
+		zap.Time("current_due", storageCard.FSRS.Due))
 
 	// Get previous reviews to calculate actual elapsed time
-	fmt.Printf("[DEBUG-SVC] Retrieving previous reviews for cardID=%s\n", cardID)
+	s.Logger.Debug("Retrieving previous reviews", zap.String("card_id", cardID))
 	previousReviews, err := s.Storage.GetCardReviews(cardID)
 	if err != nil {
-		fmt.Printf("[DEBUG-SVC] Error getting reviews: %v\n", err)
+		s.Logger.Warn("Error getting reviews, proceeding with default elapsed days", zap.String("card_id", cardID), zap.Error(err))
 		// Don't fail the operation, just continue with default elapsed days
 	}
-	fmt.Printf("[DEBUG-SVC] Found %d previous reviews for card %s\n", len(previousReviews), cardID)
+	s.Logger.Debug("Found previous reviews", zap.String("card_id", cardID), zap.Int("review_count", len(previousReviews)))
 
 	// Calculate elapsed days since last review if we have review history
 	if len(previousReviews) > 0 {
@@ -413,12 +456,16 @@ func (s *FlashcardService) SubmitReviewWithTime(cardID string, rating gofsrs.Rat
 		// Update the ElapsedDays in the card's FSRS state
 		storageCard.FSRS.ElapsedDays = elapsedDays
 
-		fmt.Printf("[DEBUG-SVC] Last review at %v, now at %v, elapsed days: %d\n",
-			lastReviewTime.Format(time.RFC3339), now.Format(time.RFC3339), elapsedDays)
+		s.Logger.Debug("Calculated elapsed days",
+			zap.String("card_id", cardID),
+			zap.Time("last_review_time", lastReviewTime),
+			zap.Time("now", now),
+			zap.Uint64("elapsed_days", elapsedDays))
 	}
 
-	fmt.Printf("[DEBUG-SVC] Calling GetSchedulingInfo with ElapsedDays=%d\n",
-		storageCard.FSRS.ElapsedDays)
+	s.Logger.Debug("Calling GetSchedulingInfo",
+		zap.String("card_id", cardID),
+		zap.Uint64("fsrs_elapsed_days", storageCard.FSRS.ElapsedDays))
 
 	// Get the complete updated FSRS card with all metadata using the new method
 	updatedFSRSCard := s.FSRSManager.GetSchedulingInfo(
@@ -426,23 +473,28 @@ func (s *FlashcardService) SubmitReviewWithTime(cardID string, rating gofsrs.Rat
 		rating,
 		now,
 	)
-	fmt.Printf("[DEBUG-SVC] FSRS scheduling result: newState=%v, newDueDate=%v, stability=%.4f, difficulty=%.4f, reps=%d\n",
-		updatedFSRSCard.State, updatedFSRSCard.Due, updatedFSRSCard.Stability, updatedFSRSCard.Difficulty, updatedFSRSCard.Reps)
+	s.Logger.Debug("FSRS scheduling result",
+		zap.String("card_id", cardID),
+		zap.Int("new_state", int(updatedFSRSCard.State)),
+		zap.Time("new_due_date", updatedFSRSCard.Due),
+		zap.Float64("stability", updatedFSRSCard.Stability),
+		zap.Float64("difficulty", updatedFSRSCard.Difficulty),
+		zap.Uint64("reps", updatedFSRSCard.Reps))
 
 	// Update the storage card with the complete FSRS data
-	fmt.Printf("[DEBUG-SVC] Updating card with complete FSRS state\n")
+	s.Logger.Debug("Updating card in memory with complete FSRS state", zap.String("card_id", cardID))
 	storageCard.FSRS = updatedFSRSCard // Replace entire FSRS card with updated version
 	storageCard.LastReviewedAt = now   // Record last reviewed time (field should exist now)
 
 	// Save the updated card state back to storage
-	fmt.Printf("[DEBUG-SVC] Updating card in storage at %v\n", timeNow().Format(time.RFC3339Nano))
+	s.Logger.Debug("Updating card in storage", zap.String("card_id", cardID), zap.Time("timestamp", timeNow()))
 	if err := s.Storage.UpdateCard(storageCard); err != nil {
-		fmt.Printf("[DEBUG-SVC] Error updating card: %v\n", err)
+		s.Logger.Error("Error updating card in storage", zap.String("card_id", cardID), zap.Error(err))
 		return Card{}, fmt.Errorf("error updating card: %w", err)
 	}
 
 	// Add review to storage
-	fmt.Printf("[DEBUG-SVC] Adding review to storage at %v\n", timeNow().Format(time.RFC3339Nano))
+	s.Logger.Debug("Adding review to storage", zap.String("card_id", cardID), zap.Time("timestamp", timeNow()))
 	reviewLog := storage.Review{
 		ID:            uuid.New().String(),
 		CardID:        cardID,
@@ -455,18 +507,18 @@ func (s *FlashcardService) SubmitReviewWithTime(cardID string, rating gofsrs.Rat
 	}
 
 	if err := s.Storage.AddReviewDirect(reviewLog); err != nil {
-		fmt.Printf("[DEBUG-SVC] Error adding review: %v\n", err)
+		s.Logger.Error("Error adding review to storage", zap.String("card_id", cardID), zap.Error(err))
 		return Card{}, fmt.Errorf("error adding review: %w", err)
 	}
-	fmt.Printf("[DEBUG-SVC] Review added successfully\n")
+	s.Logger.Debug("Review added to storage successfully", zap.String("card_id", cardID))
 
 	// Persist changes to disk
-	fmt.Printf("[DEBUG-SVC] Saving storage to disk at %v\n", timeNow().Format(time.RFC3339Nano))
+	s.Logger.Debug("Saving storage to disk", zap.String("card_id", cardID), zap.Time("timestamp", timeNow()))
 	if err := s.Storage.Save(); err != nil {
-		fmt.Printf("[DEBUG-SVC] Error saving storage: %v\n", err)
+		s.Logger.Error("Error saving storage", zap.String("card_id", cardID), zap.Error(err))
 		return Card{}, fmt.Errorf("error saving storage: %w", err)
 	}
-	fmt.Printf("[DEBUG-SVC] Storage saved successfully\n")
+	s.Logger.Debug("Storage saved successfully", zap.String("card_id", cardID))
 
 	// Convert updated storage.Card to our main Card type
 	updatedCard := Card{
@@ -479,8 +531,10 @@ func (s *FlashcardService) SubmitReviewWithTime(cardID string, rating gofsrs.Rat
 	}
 
 	elapsed := time.Since(startTime)
-	fmt.Printf("[DEBUG-SVC] SubmitReview completed in %v at %v\n",
-		elapsed, timeNow().Format(time.RFC3339Nano))
+	s.Logger.Debug("SubmitReview completed",
+		zap.String("card_id", cardID),
+		zap.Duration("elapsed", elapsed),
+		zap.Time("end_time", timeNow()))
 
 	return updatedCard, nil
 }
@@ -625,40 +679,41 @@ type DueDateProgressStats struct {
 func (s *FlashcardService) GetDueDateProgressStats(tag string) (DueDateProgressStats, error) {
 	stats := DueDateProgressStats{}
 
-	// fmt.Printf("GetDueDateProgressStats called for tag: %s\n", tag)
+	s.Logger.Debug("GetDueDateProgressStats called", zap.String("tag", tag))
 
 	cards, err := s.GetCardsByTag(tag) // Uses the corrected GetCardsByTag
 	if err != nil {
+		s.Logger.Error("Error getting cards by tag", zap.String("tag", tag), zap.Error(err))
 		return stats, fmt.Errorf("error getting cards for tag '%s': %w", tag, err)
 	}
 
 	stats.TotalCards = len(cards)
-	// fmt.Printf("Found %d cards with tag %s\n", stats.TotalCards, tag)
+	s.Logger.Debug("Found cards with tag", zap.String("tag", tag), zap.Int("count", stats.TotalCards))
 
 	if stats.TotalCards == 0 {
 		return stats, nil // No cards for this tag, progress is 0
 	}
 
 	masteredCount := 0
-	for _, card := range cards {
-		// fmt.Printf("Checking card %d: %s\n", i+1, card.ID)
+	for i, card := range cards {
+		s.Logger.Debug("Checking card for mastery", zap.Int("index", i+1), zap.String("card_id", card.ID), zap.String("tag", tag))
 		reviews, err := s.Storage.GetCardReviews(card.ID)
 		if err != nil {
 			// Log or handle error? For now, skip card if reviews can't be fetched.
-			// fmt.Printf("Warning: could not get reviews for card %s: %v\n", card.ID, err)
+			s.Logger.Warn("Could not get reviews for card", zap.String("card_id", card.ID), zap.Error(err))
 			continue
 		}
-		// fmt.Printf("Card %s has %d reviews\n", card.ID, len(reviews))
+		s.Logger.Debug("Card review count", zap.String("card_id", card.ID), zap.Int("review_count", len(reviews)))
 		if len(reviews) > 0 {
 			// Sort reviews by timestamp descending to get the latest
 			sort.Slice(reviews, func(i, j int) bool {
 				return reviews[i].Timestamp.After(reviews[j].Timestamp)
 			})
 			lastReview := reviews[0]
-			// fmt.Printf("Card %s last review rating: %d\n", card.ID, lastReview.Rating)
+			s.Logger.Debug("Card last review details", zap.String("card_id", card.ID), zap.Int("rating", int(lastReview.Rating)), zap.Time("timestamp", lastReview.Timestamp))
 			if lastReview.Rating == gofsrs.Easy { // Check if last rating was Easy (4)
 				masteredCount++
-				// fmt.Printf("Card %s counted as mastered\n", card.ID)
+				s.Logger.Debug("Card counted as mastered", zap.String("card_id", card.ID))
 			}
 		}
 	}
@@ -666,7 +721,7 @@ func (s *FlashcardService) GetDueDateProgressStats(tag string) (DueDateProgressS
 	stats.MasteredCards = masteredCount
 	stats.ProgressPercent = (float64(masteredCount) / float64(stats.TotalCards)) * 100.0
 
-	// fmt.Printf("GetDueDateProgressStats result: %+v\n", stats)
+	s.Logger.Debug("GetDueDateProgressStats result", zap.String("tag", tag), zap.Any("stats", stats))
 
 	return stats, nil
 }

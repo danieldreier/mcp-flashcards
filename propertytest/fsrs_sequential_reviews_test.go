@@ -6,18 +6,38 @@ import (
 	"time"
 
 	gofsrs "github.com/open-spaced-repetition/go-fsrs"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // TestFSRSSequentialReviews tests multiple reviews on the same card
 // to verify state transitions and due date calculations over time.
 func TestFSRSSequentialReviews(t *testing.T) {
+	// Initialize Zap logger for this test
+	logConfig := zap.NewDevelopmentConfig()
+	logConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	logConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	logConfig.EncoderConfig.CallerKey = ""
+	logConfig.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	logger, err := logConfig.Build(zap.AddStacktrace(zapcore.ErrorLevel))
+	if err != nil {
+		t.Fatalf("Failed to create zap logger: %v", err)
+	}
+	defer logger.Sync()
+
 	mcpClient, ctx, _, clientCleanup, err := SetupTestClientWithLongTimeout(t, 300) // Longer timeout for sequential reviews
 	if err != nil {
-		t.Fatalf("Failed to setup client: %v", err)
+		// Use zap logger for fatal errors
+		logger.Fatal("Failed to setup client", zap.Error(err))
 	}
 	defer clientCleanup()
 
+	// Pass the logger to the SUT factory
+	// Note: The factory function in common_test.go needs to be updated
+	// if it doesn't already accept and use a passed-in logger.
+	// Assuming for now common_test.go's factory handles this or we modify it later.
 	sut := FlashcardSUTFactory(mcpClient, ctx, nil, nil, t)
+	sut.Logger = logger // Explicitly assign logger if factory doesn't handle it
 
 	// Create a card
 	createCard := &CreateCardCmd{
@@ -28,10 +48,10 @@ func TestFSRSSequentialReviews(t *testing.T) {
 	createResult := createCard.Run(sut)
 	createResp, ok := createResult.(CreateCardResponse)
 	if !ok {
-		t.Fatalf("Failed to create card: %v", createResult)
+		logger.Fatal("Failed to create card", zap.Any("result", createResult))
 	}
 	cardID := createResp.Card.ID
-	t.Logf("Created card %s with initial state: %v", cardID, createResp.Card.FSRS.State)
+	logger.Debug("Created card", zap.String("card_id", cardID), zap.Any("initial_state", createResp.Card.FSRS.State))
 
 	// Review sequence
 	reviews := []gofsrs.Rating{gofsrs.Good, gofsrs.Again, gofsrs.Good, gofsrs.Good, gofsrs.Easy, gofsrs.Hard}
@@ -70,18 +90,36 @@ func TestFSRSSequentialReviews(t *testing.T) {
 
 		// Compare service result with direct library calculation
 		serviceCardFSRS := reviewResp.Card.FSRS
-		t.Logf("--- Review %d (Rating: %d) --- NOW=%v", i+1, rating, now.Format(time.RFC3339))
-		t.Logf("Library -> State: %v, Due: %v (in %v)", expectedLibraryCard.State, expectedLibraryCard.Due.Format(time.RFC3339), expectedLibraryCard.Due.Sub(now))
-		t.Logf("Service -> State: %v, Due: %v (in %v)", serviceCardFSRS.State, serviceCardFSRS.Due.Format(time.RFC3339), serviceCardFSRS.Due.Sub(now))
+		logger.Debug("Review comparison",
+			zap.Int("review_num", i+1),
+			zap.Int("rating", int(rating)),
+			zap.Time("review_time", now),
+			zap.Any("library_state", expectedLibraryCard.State),
+			zap.Time("library_due", expectedLibraryCard.Due),
+			zap.Duration("library_due_in", expectedLibraryCard.Due.Sub(now)),
+			zap.Any("service_state", serviceCardFSRS.State),
+			zap.Time("service_due", serviceCardFSRS.Due),
+			zap.Duration("service_due_in", serviceCardFSRS.Due.Sub(now)))
 
 		// Compare states
 		if serviceCardFSRS.State != expectedLibraryCard.State {
+			// Use logger for errors
+			logger.Error("State mismatch",
+				zap.Int("review_num", i+1),
+				zap.Int("rating", int(rating)),
+				zap.Any("expected_state", expectedLibraryCard.State),
+				zap.Any("actual_state", serviceCardFSRS.State))
 			t.Errorf("Review %d (Rating %d): State mismatch. Expected(Lib) %v, Got(Svc) %v",
 				i+1, rating, expectedLibraryCard.State, serviceCardFSRS.State)
 		}
 
 		// Compare due dates (allow small tolerance)
 		if serviceCardFSRS.Due.Sub(expectedLibraryCard.Due).Abs() > 5*time.Second {
+			logger.Error("Due date mismatch",
+				zap.Int("review_num", i+1),
+				zap.Int("rating", int(rating)),
+				zap.Time("expected_due", expectedLibraryCard.Due),
+				zap.Time("actual_due", serviceCardFSRS.Due))
 			t.Errorf("Review %d (Rating %d): Due date mismatch. Expected(Lib) %v, Got(Svc) %v",
 				i+1, rating, expectedLibraryCard.Due.Format(time.RFC3339), serviceCardFSRS.Due.Format(time.RFC3339))
 		}

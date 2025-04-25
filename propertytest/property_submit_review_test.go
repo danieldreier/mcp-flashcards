@@ -160,14 +160,8 @@ func TestGetDueCardCommand(t *testing.T) {
 	}
 	defer clientCleanup()
 
-	// Create a SUT using the factory, passing the instance cleanup
-	sut := &FlashcardSUT{
-		Client:             mcpClient,
-		Ctx:                ctx,
-		Cancel:             cancel,
-		tempDirCleanupFunc: nil, // We're managing the tempDir cleanup separately with defer
-		T:                  t,
-	}
+	// Use the SUT factory (Cleanup is handled by the combined defer)
+	sut := FlashcardSUTFactory(mcpClient, ctx, cancel, nil, t) // Pass nil for tempCleanup as it's handled by the deferred clientCleanup
 
 	// Create several cards with different due dates and tags
 	cards := []struct {
